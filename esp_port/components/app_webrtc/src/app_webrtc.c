@@ -1237,8 +1237,16 @@ STATUS signalingMessageReceived(UINT64 customData, webrtc_message_t* pWebRtcMess
             /*
              * For viewer, session should already exist. Use unified interface to process the answer.
              */
-            pAppWebRTCSession = pSampleConfiguration->webrtcSessionList[0];
-            CHK(pAppWebRTCSession != NULL, STATUS_INVALID_OPERATION);
+            /* LOCAL PATCH (BitBang): route the answer to the session it
+             * belongs to. pAppWebRTCSession was already resolved from
+             * peer_client_id through the hash table above; this used to
+             * overwrite it with webrtcSessionList[0], which is right only
+             * while exactly one session exists. With two, every answer lands
+             * on the oldest: that session gets a stranger's answer and fails
+             * ICE on the 12s timeout, and the session the answer was meant
+             * for waits for one that never arrives. */
+            CHK_ERR(peerConnectionFound && pAppWebRTCSession != NULL, STATUS_INVALID_OPERATION,
+                    "No session for answer from peer %s", pWebRtcMessage->peer_client_id);
 
             pc_interface = gWebRtcAppConfig.peer_connection_if;
 
