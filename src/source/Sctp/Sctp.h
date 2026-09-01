@@ -5,6 +5,17 @@
 #ifndef __KINESIS_VIDEO_WEBRTC_CLIENT_SCTP_SCTP__
 #define __KINESIS_VIDEO_WEBRTC_CLIENT_SCTP_SCTP__
 
+/* How long sctpSessionWriteMessage will wait for send-buffer space before
+ * giving up on a message, and how often it re-checks. The socket is
+ * non-blocking; without this the caller has no backpressure signal. */
+/* How often usrsctp_handle_timers is driven. usrsctp's own timer thread
+ * uses 10ms; anything much coarser delays retransmission. */
+#define SCTP_TIMER_INTERVAL_MS       10
+#define SCTP_TIMER_THREAD_STACK_SIZE (8 * 1024)
+
+#define SCTP_SEND_BUFFER_RETRY_MS    2
+#define SCTP_SEND_BUFFER_MAX_WAIT_MS 5000
+
 #pragma once
 
 #ifdef __cplusplus

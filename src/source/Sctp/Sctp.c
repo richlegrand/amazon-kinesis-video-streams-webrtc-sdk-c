@@ -55,6 +55,33 @@ CleanUp:
     return retStatus;
 }
 
+/* usrsctp_init_nothreads suppresses usrsctp's own timer thread, and in that
+ * mode the application has to drive usrsctp_handle_timers itself. Nothing
+ * did, so the association ran with no timers at all: no T3-rtx, no delayed
+ * SACK, no heartbeats.
+ *
+ * With no retransmission a lost packet is lost for good. A message that
+ * fits in one SCTP packet survives that -- it either arrives or the peer
+ * asks again -- which is why small messages looked fine. A message large
+ * enough to fragment needs every fragment, so a single loss stalls that
+ * stream permanently while every send still reports success and the
+ * association still looks healthy.
+ *
+ * SCTP_TIMER_INTERVAL_MS is the granularity usrsctp's timers are quantised
+ * to; 10ms matches what its own timer thread uses. */
+static volatile BOOL gSctpTimerRunning = FALSE;
+static TID gSctpTimerTid = INVALID_TID_VALUE;
+
+static PVOID sctpTimerRoutine(PVOID arg)
+{
+    UNUSED_PARAM(arg);
+    while (gSctpTimerRunning) {
+        THREAD_SLEEP(SCTP_TIMER_INTERVAL_MS * HUNDREDS_OF_NANOS_IN_A_MILLISECOND);
+        usrsctp_handle_timers(SCTP_TIMER_INTERVAL_MS);
+    }
+    return NULL;
+}
+
 STATUS initSctpSession()
 {
     STATUS retStatus = STATUS_SUCCESS;
@@ -64,11 +91,28 @@ STATUS initSctpSession()
     // Disable Explicit Congestion Notification
     usrsctp_sysctl_set_sctp_ecn_enable(0);
 
+    gSctpTimerRunning = TRUE;
+    if (STATUS_FAILED(THREAD_CREATE_EX_EXT(&gSctpTimerTid, "sctpTimer", SCTP_TIMER_THREAD_STACK_SIZE, TRUE, sctpTimerRoutine, NULL))) {
+        DLOGE("failed to start the sctp timer thread; retransmission will not happen");
+        gSctpTimerRunning = FALSE;
+        gSctpTimerTid = INVALID_TID_VALUE;
+    }
+
     return retStatus;
 }
 
 VOID deinitSctpSession()
 {
+    /* Stop driving timers before usrsctp_finish, or the timer thread walks
+     * structures it is freeing. */
+    if (gSctpTimerRunning) {
+        gSctpTimerRunning = FALSE;
+        if (IS_VALID_TID_VALUE(gSctpTimerTid)) {
+            THREAD_JOIN(gSctpTimerTid, NULL);
+            gSctpTimerTid = INVALID_TID_VALUE;
+        }
+    }
+
     // need to block until usrsctp_finish or sctp thread could be calling free objects and cause segfault
     while (usrsctp_finish() != 0) {
         THREAD_SLEEP(DEFAULT_USRSCTP_TEARDOWN_POLLING_INTERVAL);
@@ -190,8 +234,41 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
     }
 
     putInt32((PINT32) &pSctpSession->spa.sendv_sndinfo.snd_ppid, isBinary ? SCTP_PPID_BINARY : SCTP_PPID_STRING);
-    CHK(usrsctp_sendv(pSctpSession->socket, pMessage, pMessageLen, NULL, 0, &pSctpSession->spa, SIZEOF(pSctpSession->spa), SCTP_SENDV_SPA, 0) > 0,
-        STATUS_INTERNAL_ERROR);
+
+    /* The socket is non-blocking, so a full send buffer comes back as
+     * EWOULDBLOCK rather than as a wait. Returning an error there gives the
+     * caller no way to tell "try again in a moment" from "this failed", and
+     * a caller streaming a large response has no other backpressure signal
+     * at all -- so it keeps writing, the buffer never drains, and delivery
+     * stops with every send still reporting success.
+     *
+     * Wait for space instead, bounded so a dead association cannot park the
+     * caller forever. This is the equivalent of gating on bufferedAmount,
+     * which is what the browser-side APIs expose and this one does not. */
+    {
+        INT32 sent;
+        UINT32 waitedMs = 0;
+        for (;;) {
+            sent = usrsctp_sendv(pSctpSession->socket, pMessage, pMessageLen, NULL, 0, &pSctpSession->spa,
+                                 SIZEOF(pSctpSession->spa), SCTP_SENDV_SPA, 0);
+            if (sent > 0) {
+                break;
+            }
+            if (errno != EWOULDBLOCK && errno != EAGAIN) {
+                break;
+            }
+            if (waitedMs >= SCTP_SEND_BUFFER_MAX_WAIT_MS) {
+                DLOGW("sctp send buffer still full after %u ms, dropping a %u byte message", waitedMs, pMessageLen);
+                break;
+            }
+            THREAD_SLEEP(SCTP_SEND_BUFFER_RETRY_MS * HUNDREDS_OF_NANOS_IN_A_MILLISECOND);
+            waitedMs += SCTP_SEND_BUFFER_RETRY_MS;
+        }
+        if (waitedMs > 0 && sent > 0) {
+            DLOGD("sctp send waited %u ms for buffer space", waitedMs);
+        }
+        CHK(sent > 0, STATUS_INTERNAL_ERROR);
+    }
 
 CleanUp:
     LEAVES();
