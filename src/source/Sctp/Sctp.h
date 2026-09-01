@@ -12,7 +12,21 @@ extern "C" {
 #endif
 
 // 1200 - 12 (SCTP header Size)
-#define SCTP_MTU                         1188
+/* Must stay under what one DTLS record can carry, because an SCTP packet
+ * has to travel as a single datagram.
+ *
+ * Dtls_mbedtls.c sets the DTLS MTU to DEFAULT_MTU_SIZE_BYTES (1200) and
+ * then, in dtlsSessionPutApplicationData, splits anything larger than
+ * mbedtls_ssl_get_max_out_record_payload() across several records. For
+ * AES-GCM that limit is about 1163 -- 1200 less a 13-byte record header,
+ * an 8-byte explicit nonce and a 16-byte tag. At 1188 a full-size SCTP
+ * packet exceeded it, was split, and both halves were discarded by the
+ * peer as malformed, with no error anywhere.
+ *
+ * Small messages fit in one packet and survived, so this only appeared
+ * once a message was large enough for usrsctp to fragment. 1100 leaves
+ * room for ciphersuites with more overhead than GCM. */
+#define SCTP_MTU                         1100
 #define SCTP_ASSOCIATION_DEFAULT_PORT    5000
 #define SCTP_DCEP_HEADER_LENGTH          12
 #define SCTP_DCEP_LABEL_LEN_OFFSET       8

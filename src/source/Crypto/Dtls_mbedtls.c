@@ -439,6 +439,16 @@ STATUS dtlsSessionPutApplicationData(PDtlsSession pDtlsSession, PBYTE pData, INT
     MUTEX_LOCK(pDtlsSession->sslLock);
     locked = TRUE;
 
+    /* Splitting here is wrong for anything datagram-oriented: SCTP expects
+     * one packet per record, and a peer receiving half of one discards it.
+     * The loop is kept because a caller may legitimately be sending a
+     * stream, but a split is worth knowing about -- it is otherwise
+     * completely silent. */
+    if (dataLen > (INT32) mbedtls_ssl_get_max_out_record_payload(&pDtlsSession->sslCtx)) {
+        DLOGW("dtls: %d byte payload exceeds the %d byte record limit and will be split", dataLen,
+              (INT32) mbedtls_ssl_get_max_out_record_payload(&pDtlsSession->sslCtx));
+    }
+
     while (iterate && writtenBytes < dataLen) {
         // In Dtls, we need to make sure that the packet is smaller than the mtu or MBEDTLS_SSL_OUT_CONTENT_LEN constant
         writeLen = MIN(dataLen - writtenBytes, mbedtls_ssl_get_max_out_record_payload(&pDtlsSession->sslCtx));
