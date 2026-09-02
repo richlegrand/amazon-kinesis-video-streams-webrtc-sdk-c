@@ -53,3 +53,9 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     -Wno-error=int-to-pointer-cast
     -Wno-error=maybe-uninitialized
 )
+
+# -O2 runs analysis that -Og does not, and this SDK's STRNCPY macro trips
+# stringop-truncation throughout. The call sites are vendor code and the
+# truncation is intended there, so the warning is downgraded for this
+# component only -- our own components keep it fatal.
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-error=stringop-truncation)
