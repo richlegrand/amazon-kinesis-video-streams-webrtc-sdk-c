@@ -3,6 +3,7 @@
  */
 #define LOG_CLASS "IceAgent"
 #include "../Include_i.h"
+#include "esp_log.h"
 
 // https://developer.mozilla.org/en-US/docs/Web/API/RTCIceCandidate/candidate
 // https://tools.ietf.org/html/rfc5245#section-15.1
@@ -2721,7 +2722,43 @@ STATUS handleStunPacket(PIceAgent pIceAgent, PBYTE pBuffer, UINT32 bufferLen, PS
     stunPacketType = (UINT16) getInt16(*((PUINT16) pBuffer));
 
     switch (stunPacketType) {
-        case STUN_PACKET_TYPE_BINDING_REQUEST:
+        case STUN_PACKET_TYPE_BINDING_REQUEST: {
+            /* The peer's connectivity checks. A browser marks the
+             * connection disconnected when these stop being answered, so
+             * if the task that reads this socket is starved the peer sees
+             * a dead path with nothing wrong with the link.
+             *
+             * The gaps between arrivals are the measurement that catches
+             * that. The peer sends at a steady rate, so a long gap
+             * followed by a short one means checks sat in the socket
+             * buffer while we were busy elsewhere -- a delay that happens
+             * entirely before this function runs, and that the reply time
+             * below therefore cannot see. Reply time covers only our own
+             * turnaround once the packet is in hand.
+             *
+             * Every socket shares these counters and nothing locks them,
+             * so a report can be off by a check or two and two sockets can
+             * both print one. Read the gaps as pooled across candidate
+             * pairs: a very short one usually means two pairs arriving
+             * together rather than a burst after a stall. Fine for
+             * watching a trend, not a place to draw a conclusion from a
+             * single window. */
+            static UINT64 lastReq, lastReport;
+            static UINT64 worstGap, bestGap, worstReply, replySum;
+            static UINT32 reqCount, replyCount;
+            UINT64 reqAt = GETTIME();
+            if (lastReq != 0) {
+                UINT64 gap = reqAt - lastReq;
+                if (gap > worstGap) {
+                    worstGap = gap;
+                }
+                if (bestGap == 0 || gap < bestGap) {
+                    bestGap = gap;
+                }
+            }
+            lastReq = reqAt;
+            reqCount++;
+
             connectivityCheckRequestsReceived++;
             CHK_STATUS(deserializeStunPacket(pBuffer, bufferLen, (PBYTE) pIceAgent->localPassword,
                                              (UINT32) STRLEN(pIceAgent->localPassword) * SIZEOF(CHAR), &pStunPacket));
@@ -2741,6 +2778,30 @@ STATUS handleStunPacket(PIceAgent pIceAgent, PBYTE pBuffer, UINT32 bufferLen, PS
                                               (UINT32) STRLEN(pIceAgent->localPassword) * SIZEOF(CHAR), pIceAgent, pIceCandidate, pSrcAddr));
 
             connectivityCheckResponsesSent++;
+            {
+                UINT64 replyIn = GETTIME() - reqAt;
+                replySum += replyIn;
+                replyCount++;
+                if (replyIn > worstReply) {
+                    worstReply = replyIn;
+                }
+                if (lastReport == 0) {
+                    lastReport = reqAt;
+                } else if (reqAt - lastReport > 10 * HUNDREDS_OF_NANOS_IN_A_SECOND) {
+                    ESP_LOGW("ice", "peer checks: %u in %llus, answered %u, gap %llu-%llums,"
+                             " reply avg %llums worst %llums",
+                             (unsigned) reqCount,
+                             (unsigned long long) ((reqAt - lastReport) / HUNDREDS_OF_NANOS_IN_A_SECOND),
+                             (unsigned) replyCount,
+                             (unsigned long long) (bestGap / HUNDREDS_OF_NANOS_IN_A_MILLISECOND),
+                             (unsigned long long) (worstGap / HUNDREDS_OF_NANOS_IN_A_MILLISECOND),
+                             (unsigned long long) (replySum / replyCount / HUNDREDS_OF_NANOS_IN_A_MILLISECOND),
+                             (unsigned long long) (worstReply / HUNDREDS_OF_NANOS_IN_A_MILLISECOND));
+                    lastReport = reqAt;
+                    reqCount = replyCount = 0;
+                    worstGap = bestGap = worstReply = replySum = 0;
+                }
+            }
             // return early if there is no candidate pair. This can happen when we get connectivity check from the peer
             // before we receive the answer.
             CHK_STATUS(findIceCandidatePairWithLocalSocketConnectionAndRemoteAddr(pIceAgent, pSocketConnection, pSrcAddr, TRUE, &pIceCandidatePair));
@@ -2773,6 +2834,7 @@ STATUS handleStunPacket(PIceAgent pIceAgent, PBYTE pBuffer, UINT32 bufferLen, PS
                 DLOGD("going to change the data sending ice candidate pair.");
             }
             break;
+        }
 
         case STUN_PACKET_TYPE_BINDING_RESPONSE_SUCCESS:
             connectivityCheckResponsesReceived++;
