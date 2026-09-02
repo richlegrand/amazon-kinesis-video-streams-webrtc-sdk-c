@@ -1,5 +1,6 @@
 #define LOG_CLASS "SCTP"
 #include "../Include_i.h"
+#include "esp_log.h"
 
 STATUS initSctpAddrConn(PSctpSession pSctpSession, struct sockaddr_conn* sconn)
 {
@@ -209,6 +210,37 @@ CleanUp:
     return retStatus;
 }
 
+/* What the association looks like from here, for a caller trying to work
+ * out why a send is failing.
+ *
+ *   rwnd == 0        the peer is not draining -- its receive window is
+ *                    shut, so this is the receiver applying backpressure
+ *                    and not a broken link.
+ *   rwnd > 0 but
+ *   unacked high     data is going out and not being acknowledged, which
+ *                    is the network or ICE.
+ *
+ * Without this the two are indistinguishable: both surface as sends that
+ * fail after the buffer-wait timeout, with nothing to say which.
+ */
+STATUS sctpSessionGetStats(PSctpSession pSctpSession, PUINT32 pRwnd, PUINT32 pUnacked)
+{
+    STATUS retStatus = STATUS_SUCCESS;
+    struct sctp_status status;
+    socklen_t len = SIZEOF(status);
+
+    CHK(pSctpSession != NULL && pRwnd != NULL && pUnacked != NULL, STATUS_NULL_ARG);
+    MEMSET(&status, 0, SIZEOF(status));
+    CHK(usrsctp_getsockopt(pSctpSession->socket, IPPROTO_SCTP, SCTP_STATUS, &status, &len) == 0,
+        STATUS_INTERNAL_ERROR);
+
+    *pRwnd = status.sstat_rwnd;
+    *pUnacked = status.sstat_unackdata;
+
+CleanUp:
+    return retStatus;
+}
+
 STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL isBinary, PBYTE pMessage, UINT32 pMessageLen)
 {
     ENTERS();
@@ -258,7 +290,15 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
                 break;
             }
             if (waitedMs >= SCTP_SEND_BUFFER_MAX_WAIT_MS) {
-                DLOGW("sctp send buffer still full after %u ms, dropping a %u byte message", waitedMs, pMessageLen);
+                UINT32 rwnd = 0, unacked = 0;
+                sctpSessionGetStats(pSctpSession, &rwnd, &unacked);
+                /* ESP_LOGW, not DLOGW: the KVS logger's level is set from
+                 * app_webrtc's config and swallows this exactly when it
+                 * matters most. */
+                ESP_LOGW("sctp", "send buffer still full after %u ms, dropping %u bytes"
+                         " (peer rwnd %u, unacked %u chunks)",
+                         (unsigned) waitedMs, (unsigned) pMessageLen,
+                         (unsigned) rwnd, (unsigned) unacked);
                 break;
             }
             THREAD_SLEEP(SCTP_SEND_BUFFER_RETRY_MS * HUNDREDS_OF_NANOS_IN_A_MILLISECOND);
