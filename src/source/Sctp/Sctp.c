@@ -241,31 +241,60 @@ CleanUp:
     return retStatus;
 }
 
-STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL isBinary, PBYTE pMessage, UINT32 pMessageLen)
+STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL isBinary, PBYTE pMessage, UINT32 pMessageLen,
+                               PRtcDataChannelInit pRtcDataChannelInit)
 {
     ENTERS();
     STATUS retStatus = STATUS_SUCCESS;
+    /* Local, not session state. It is filled here and consumed by
+     * usrsctp_sendv a few lines down, so it never outlives the call --
+     * while sharing it on the session let two senders overwrite each
+     * other's stream id and payload type. Roughly forty bytes. */
+    struct sctp_sendv_spa spa;
 
     CHK(pSctpSession != NULL && pMessage != NULL, STATUS_NULL_ARG);
 
-    MEMSET(&pSctpSession->spa, 0x00, SIZEOF(struct sctp_sendv_spa));
+    MEMSET(&spa, 0x00, SIZEOF(spa));
 
-    pSctpSession->spa.sendv_flags |= SCTP_SEND_SNDINFO_VALID;
-    pSctpSession->spa.sendv_sndinfo.snd_sid = streamId;
+    spa.sendv_flags |= SCTP_SEND_SNDINFO_VALID;
+    spa.sendv_sndinfo.snd_sid = streamId;
 
-    if ((pSctpSession->packet[1] & DCEP_DATA_CHANNEL_RELIABLE_UNORDERED) != 0) {
-        pSctpSession->spa.sendv_sndinfo.snd_flags |= SCTP_UNORDERED;
-    }
-    if ((pSctpSession->packet[1] & DCEP_DATA_CHANNEL_REXMIT) != 0) {
-        pSctpSession->spa.sendv_prinfo.pr_policy = SCTP_PR_SCTP_RTX;
-        pSctpSession->spa.sendv_prinfo.pr_value = getUnalignedInt32BigEndian((PINT32) (pSctpSession->packet + SIZEOF(UINT32)));
-    }
-    if ((pSctpSession->packet[1] & DCEP_DATA_CHANNEL_TIMED) != 0) {
-        pSctpSession->spa.sendv_prinfo.pr_policy = SCTP_PR_SCTP_TTL;
-        pSctpSession->spa.sendv_prinfo.pr_value = getUnalignedInt32BigEndian((PINT32) (pSctpSession->packet + SIZEOF(UINT32)));
+    /* Ordering and reliability come from the channel being written, not from
+     * pSctpSession->packet. That buffer holds the last DCEP OPEN this session
+     * built, so reading it here gave every channel the flags of whichever one
+     * was opened most recently -- correct only while there is exactly one. */
+    if (pRtcDataChannelInit != NULL) {
+        if (!pRtcDataChannelInit->ordered) {
+            spa.sendv_sndinfo.snd_flags |= SCTP_UNORDERED;
+        }
+        if (pRtcDataChannelInit->maxRetransmits.isNull == FALSE) {
+            spa.sendv_flags |= SCTP_SEND_PRINFO_VALID;
+            spa.sendv_prinfo.pr_policy = SCTP_PR_SCTP_RTX;
+            spa.sendv_prinfo.pr_value = pRtcDataChannelInit->maxRetransmits.value;
+        } else if (pRtcDataChannelInit->maxPacketLifeTime.isNull == FALSE) {
+            spa.sendv_flags |= SCTP_SEND_PRINFO_VALID;
+            spa.sendv_prinfo.pr_policy = SCTP_PR_SCTP_TTL;
+            spa.sendv_prinfo.pr_value = pRtcDataChannelInit->maxPacketLifeTime.value;
+        }
     }
 
-    putInt32((PINT32) &pSctpSession->spa.sendv_sndinfo.snd_ppid, isBinary ? SCTP_PPID_BINARY : SCTP_PPID_STRING);
+    putInt32((PINT32) &spa.sendv_sndinfo.snd_ppid, isBinary ? SCTP_PPID_BINARY : SCTP_PPID_STRING);
+
+    /* Report each stream's delivery settings the first time it is written, so
+     * two channels opened with different reliability can be seen actually
+     * sending differently. Cheap: a bitmask over the low stream ids, printed
+     * once each. */
+    {
+        static UINT32 loggedStreams;
+        if (streamId < 32 && (loggedStreams & (1u << streamId)) == 0) {
+            loggedStreams |= (1u << streamId);
+            ESP_LOGW("sctp", "stream %u: %s%s", (unsigned) streamId,
+                     (spa.sendv_sndinfo.snd_flags & SCTP_UNORDERED) ? "unordered" : "ordered",
+                     (spa.sendv_flags & SCTP_SEND_PRINFO_VALID)
+                         ? ((spa.sendv_prinfo.pr_policy == SCTP_PR_SCTP_TTL) ? ", lifetime-limited" : ", retransmit-limited")
+                         : ", reliable");
+        }
+    }
 
     /* The socket is non-blocking, so a full send buffer comes back as
      * EWOULDBLOCK rather than as a wait. Returning an error there gives the
@@ -281,8 +310,8 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
         INT32 sent;
         UINT32 waitedMs = 0;
         for (;;) {
-            sent = usrsctp_sendv(pSctpSession->socket, pMessage, pMessageLen, NULL, 0, &pSctpSession->spa,
-                                 SIZEOF(pSctpSession->spa), SCTP_SENDV_SPA, 0);
+            sent = usrsctp_sendv(pSctpSession->socket, pMessage, pMessageLen, NULL, 0, &spa,
+                                 SIZEOF(spa), SCTP_SENDV_SPA, 0);
             if (sent > 0) {
                 break;
             }
@@ -338,10 +367,11 @@ STATUS sctpSessionWriteDcep(PSctpSession pSctpSession, UINT32 streamId, PCHAR pC
 {
     ENTERS();
     STATUS retStatus = STATUS_SUCCESS;
+    struct sctp_sendv_spa spa;
 
     CHK(pSctpSession != NULL && pChannelName != NULL, STATUS_NULL_ARG);
 
-    MEMSET(&pSctpSession->spa, 0x00, SIZEOF(struct sctp_sendv_spa));
+    MEMSET(&spa, 0x00, SIZEOF(spa));
     MEMSET(pSctpSession->packet, 0x00, SIZEOF(pSctpSession->packet));
     pSctpSession->packetSize = SCTP_DCEP_HEADER_LENGTH + pChannelNameLen;
     /* Setting the fields of DATA_CHANNEL_OPEN message */
@@ -373,11 +403,11 @@ STATUS sctpSessionWriteDcep(PSctpSession pSctpSession, UINT32 streamId, PCHAR pC
 
     putUnalignedInt16BigEndian(pSctpSession->packet + SCTP_DCEP_LABEL_LEN_OFFSET, pChannelNameLen);
     MEMCPY(pSctpSession->packet + SCTP_DCEP_LABEL_OFFSET, pChannelName, pChannelNameLen);
-    pSctpSession->spa.sendv_flags |= SCTP_SEND_SNDINFO_VALID;
-    pSctpSession->spa.sendv_sndinfo.snd_sid = streamId;
+    spa.sendv_flags |= SCTP_SEND_SNDINFO_VALID;
+    spa.sendv_sndinfo.snd_sid = streamId;
 
-    putInt32((PINT32) &pSctpSession->spa.sendv_sndinfo.snd_ppid, SCTP_PPID_DCEP);
-    CHK(usrsctp_sendv(pSctpSession->socket, pSctpSession->packet, pSctpSession->packetSize, NULL, 0, &pSctpSession->spa, SIZEOF(pSctpSession->spa),
+    putInt32((PINT32) &spa.sendv_sndinfo.snd_ppid, SCTP_PPID_DCEP);
+    CHK(usrsctp_sendv(pSctpSession->socket, pSctpSession->packet, pSctpSession->packetSize, NULL, 0, &spa, SIZEOF(spa),
                       SCTP_SENDV_SPA, 0) > 0,
         STATUS_INTERNAL_ERROR);
 CleanUp:
@@ -436,8 +466,11 @@ STATUS handleDcepPacket(PSctpSession pSctpSession, UINT32 streamId, PBYTE data, 
 
     CHK(SCTP_MAX_ALLOWABLE_PACKET_LENGTH >= length, STATUS_SCTP_INVALID_DCEP_PACKET);
 
+    /* data[1] is the DCEP channel type and data[4..7] the reliability
+     * parameter. Hand both up so the channel can be sent on the way the peer
+     * opened it. */
     pSctpSession->sctpSessionCallbacks.dataChannelOpenFunc(pSctpSession->sctpSessionCallbacks.customData, streamId, data + SCTP_DCEP_HEADER_LENGTH,
-                                                           labelLength);
+                                                           labelLength, data[1], (UINT32) getUnalignedInt32BigEndian((PINT32) (data + SIZEOF(UINT32))));
 
 CleanUp:
     LEAVES();

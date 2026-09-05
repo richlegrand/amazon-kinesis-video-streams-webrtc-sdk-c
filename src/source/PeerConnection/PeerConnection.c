@@ -636,7 +636,7 @@ CleanUp:
     LEAVES();
 }
 
-VOID onSctpSessionDataChannelOpen(UINT64 customData, UINT32 channelId, PBYTE pName, UINT32 nameLen)
+VOID onSctpSessionDataChannelOpen(UINT64 customData, UINT32 channelId, PBYTE pName, UINT32 nameLen, BYTE channelType, UINT32 reliability)
 {
     ENTERS();
     STATUS retStatus = STATUS_SUCCESS;
@@ -652,6 +652,18 @@ VOID onSctpSessionDataChannelOpen(UINT64 customData, UINT32 channelId, PBYTE pNa
     pKvsDataChannel->dataChannel.id = channelId;
     pKvsDataChannel->pRtcPeerConnection = (PRtcPeerConnection) pKvsPeerConnection;
     pKvsDataChannel->channelId = channelId;
+
+    /* Record what the peer asked for. Without this the struct stays zeroed
+     * from the MEMCALLOC above, which reads as ordered == FALSE, and every
+     * send on a peer-created channel would go out unordered. */
+    pKvsDataChannel->rtcDataChannelInit.ordered = (channelType & DCEP_DATA_CHANNEL_RELIABLE_UNORDERED) == 0;
+    NULLABLE_SET_EMPTY(pKvsDataChannel->rtcDataChannelInit.maxRetransmits);
+    NULLABLE_SET_EMPTY(pKvsDataChannel->rtcDataChannelInit.maxPacketLifeTime);
+    if ((channelType & DCEP_DATA_CHANNEL_REXMIT) != 0) {
+        NULLABLE_SET_VALUE(pKvsDataChannel->rtcDataChannelInit.maxRetransmits, (UINT16) reliability);
+    } else if ((channelType & DCEP_DATA_CHANNEL_TIMED) != 0) {
+        NULLABLE_SET_VALUE(pKvsDataChannel->rtcDataChannelInit.maxPacketLifeTime, (UINT16) reliability);
+    }
 
     // Set the data channel parameters when data channel is created by peer
     pKvsDataChannel->rtcDataChannelDiagnostics.dataChannelIdentifier = channelId;

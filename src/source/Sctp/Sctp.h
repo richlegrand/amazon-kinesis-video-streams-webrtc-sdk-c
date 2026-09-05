@@ -70,7 +70,11 @@ typedef VOID (*SctpSessionOutboundPacketFunc)(UINT64, PBYTE, UINT32);
 
 // Callback that is fired when SCTP has a new DataChannel
 // Argument is ChannelID and ChannelName + Len
-typedef VOID (*SctpSessionDataChannelOpenFunc)(UINT64, UINT32, PBYTE, UINT32);
+/* customData, streamId, label, labelLen, DCEP channel type, reliability param.
+ * The last two carry what the peer asked for so the channel can be sent on
+ * the way it was opened, rather than however the session last happened to be
+ * configured. */
+typedef VOID (*SctpSessionDataChannelOpenFunc)(UINT64, UINT32, PBYTE, UINT32, BYTE, UINT32);
 
 // Callback that is fired when SCTP has a DataChannel Message.
 // Argument is ChannelID and Message + Len
@@ -86,7 +90,6 @@ typedef struct {
 typedef struct {
     volatile SIZE_T shutdownStatus;
     struct socket* socket;
-    struct sctp_sendv_spa spa;
     BYTE packet[SCTP_MAX_ALLOWABLE_PACKET_LENGTH];
     UINT32 packetSize;
     SctpSessionCallbacks sctpSessionCallbacks;
@@ -98,7 +101,7 @@ STATUS createSctpSession(PSctpSessionCallbacks, PSctpSession*);
 STATUS freeSctpSession(PSctpSession*);
 STATUS putSctpPacket(PSctpSession, PBYTE, UINT32);
 STATUS sctpSessionGetStats(PSctpSession, PUINT32, PUINT32);
-STATUS sctpSessionWriteMessage(PSctpSession, UINT32, BOOL, PBYTE, UINT32);
+STATUS sctpSessionWriteMessage(PSctpSession, UINT32, BOOL, PBYTE, UINT32, PRtcDataChannelInit);
 STATUS sctpSessionWriteDcep(PSctpSession, UINT32, PCHAR, UINT32, PRtcDataChannelInit);
 
 // Callbacks used by usrsctp
