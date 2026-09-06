@@ -26,6 +26,19 @@ extern "C" {
 /* Internal Constants */
 // Essential timing constants for app_webrtc operations
 #define SAMPLE_SESSION_CLEANUP_WAIT_PERIOD (5 * HUNDREDS_OF_NANOS_IN_A_SECOND)
+
+/* How long an offer may go unanswered before its session is reclaimed.
+ *
+ * A session is otherwise only marked for cleanup on DISCONNECTED or FAILED,
+ * and a connection that never came up reaches neither -- it sits in CONNECTING
+ * holding one of the very few session slots for as long as the device runs.
+ * Observed: a phone whose page connected on its own, then reloaded, left the
+ * first session behind and the reload was refused with "Max streaming sessions
+ * reached" while the abandoned one was still there 35 seconds later.
+ *
+ * Well clear of a slow answer over a relay, which arrives in a second or two,
+ * and short enough that a person retrying does not have to wait on it. */
+#define APP_WEBRTC_OFFER_ANSWER_TIMEOUT (15 * HUNDREDS_OF_NANOS_IN_A_SECOND)
 #define SAMPLE_PENDING_MESSAGE_CLEANUP_DURATION (20 * HUNDREDS_OF_NANOS_IN_A_SECOND)
 
 // Hash table configuration
@@ -199,6 +212,7 @@ typedef papp_webrtc_context_t PSampleConfiguration;
 struct __AppWebRTCSession {
     // === Core Session Management ===
     volatile ATOMIC_BOOL terminateFlag;        //!< Flag to indicate session should be terminated
+    volatile ATOMIC_BOOL everConnected;        //!< Set once the peer connection reaches CONNECTED
     volatile ATOMIC_BOOL peerIdReceived;       //!< Flag indicating peer ID has been received
     volatile ATOMIC_BOOL firstFrame;           //!< Flag for first frame handling
     char peerId[APP_WEBRTC_MAX_SIGNALING_CLIENT_ID_LEN + 1]; //!< Peer identifier string

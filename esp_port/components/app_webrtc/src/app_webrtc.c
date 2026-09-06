@@ -303,6 +303,7 @@ static WEBRTC_STATUS peerConnectionStateChangedWrapper(uint64_t customData, webr
             break;
         case WEBRTC_PEER_STATE_CONNECTED:
             if (pAppWebRTCSession != NULL) {
+                ATOMIC_STORE_BOOL(&pAppWebRTCSession->everConnected, TRUE);
                 ESP_LOGI(TAG, "Peer connection state for %s: %d", pAppWebRTCSession->peerId, state);
                 raiseEvent(APP_WEBRTC_EVENT_PEER_CONNECTED, 0, pAppWebRTCSession->peerId, "Peer connected");
             } else {
@@ -788,6 +789,19 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
         // Get the signaling client state
         MUTEX_LOCK(pSampleConfiguration->sampleConfigurationObjLock);
         sampleConfigurationObjLockLocked = TRUE;
+
+        /* Reclaim sessions whose offer was never answered. They are not
+         * failed and not disconnected -- they never connected at all -- so
+         * nothing else marks them, and each one holds a slot permanently. */
+        for (i = 0; i < pSampleConfiguration->streamingSessionCount; ++i) {
+            PAppWebRTCSession pCandidate = pSampleConfiguration->webrtcSessionList[i];
+            if (pCandidate != NULL && !ATOMIC_LOAD_BOOL(&pCandidate->terminateFlag) &&
+                !ATOMIC_LOAD_BOOL(&pCandidate->everConnected) && pCandidate->offerReceiveTime != 0 &&
+                GETTIME() - pCandidate->offerReceiveTime > APP_WEBRTC_OFFER_ANSWER_TIMEOUT) {
+                ESP_LOGW(TAG, "Peer %s never answered the offer; reclaiming its session slot", pCandidate->peerId);
+                ATOMIC_STORE_BOOL(&pCandidate->terminateFlag, TRUE);
+            }
+        }
 
         // Check for terminated streaming session
         for (i = 0; i < pSampleConfiguration->streamingSessionCount; ++i) {
