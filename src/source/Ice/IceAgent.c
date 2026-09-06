@@ -826,19 +826,31 @@ STATUS iceAgentSendPacket(PIceAgent pIceAgent, PBYTE pBuffer, UINT32 bufferLen)
     retStatus = iceUtilsSendData(pBuffer, bufferLen, &pIceAgent->pDataSendingIceCandidatePair->remote->ipAddress,
                                  pIceAgent->pDataSendingIceCandidatePair->local->pSocketConnection, pTurnConnection, isRelay);
     {
-        static int64_t sumWait, sumSend, windowStart;
-        static UINT32 n;
+        static int64_t sumWait, sumSend, windowStart, worstSend;
+        static UINT32 n, slow;
         int64_t now = esp_timer_get_time();
+        int64_t sendUs = now - t_s0;
         sumWait += t_locked - t_enter;
-        sumSend += now - t_s0;
+        sumSend += sendUs;
         n++;
+        /* The mean hides what matters here. socketSendDataWithRetry sleeps
+         * 50 ms when lwIP is out of buffers, so a handful of sends taking
+         * tens of milliseconds looks the same on average as every send being
+         * uniformly slow -- and the two have completely different fixes. */
+        if (sendUs > 2000) {
+            slow++;
+        }
+        if (sendUs > worstSend) {
+            worstSend = sendUs;
+        }
         if (windowStart == 0) {
             windowStart = t_enter;
         } else if (now - windowStart > 5000000) {
-            ESP_LOGW("ice", "send path: %.2f ms waiting for the agent lock + %.2f ms in the socket, over %u packets",
-                     sumWait / 1000.0 / n, sumSend / 1000.0 / n, (unsigned) n);
-            sumWait = sumSend = 0;
-            n = 0;
+            ESP_LOGW("ice", "send path: lock %.2f ms + socket %.2f ms avg, worst %.1f ms, %u over 2 ms, of %u",
+                     sumWait / 1000.0 / n, sumSend / 1000.0 / n, worstSend / 1000.0,
+                     (unsigned) slow, (unsigned) n);
+            sumWait = sumSend = worstSend = 0;
+            n = slow = 0;
             windowStart = now;
         }
     }
