@@ -119,7 +119,29 @@ INT32 dtlsSessionSendCallback(PVOID customData, const unsigned char* pBuf, ULONG
 
     CHK(pDtlsSession != NULL, STATUS_NULL_ARG);
 
-    pDtlsSession->dtlsSessionCallbacks.outboundPacketFn(pDtlsSession->dtlsSessionCallbacks.outBoundPacketFnCustomData, (PBYTE) pBuf, len);
+    /* This is the send, and it happens inside mbedtls_ssl_write -- so the
+     * ssl_write bracket around the caller covers encryption and this
+     * together. Time it separately: raw UDP to the same host costs about
+     * 210 us, and if this costs far more then the packet is not being held
+     * up by crypto at all. */
+    {
+        static int64_t sumSend, windowStart;
+        static UINT32 packets;
+        int64_t t0 = esp_timer_get_time();
+        pDtlsSession->dtlsSessionCallbacks.outboundPacketFn(pDtlsSession->dtlsSessionCallbacks.outBoundPacketFnCustomData, (PBYTE) pBuf, len);
+        int64_t now = esp_timer_get_time();
+        sumSend += now - t0;
+        packets++;
+        if (windowStart == 0) {
+            windowStart = t0;
+        } else if (now - windowStart > 5000000) {
+            ESP_LOGW("dtls", "  of which outbound send: %.2f ms each over %u packets",
+                     sumSend / 1000.0 / packets, (unsigned) packets);
+            sumSend = 0;
+            packets = 0;
+            windowStart = now;
+        }
+    }
 
 CleanUp:
     return STATUS_FAILED(retStatus) ? -retStatus : len;
