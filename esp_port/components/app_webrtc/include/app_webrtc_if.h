@@ -355,6 +355,11 @@ typedef struct {
     // Data channel operations
 
     // Create a data channel for a session
+    /* Which channel a handle refers to. With more than one channel open, the
+     * open callback is the only place the application learns a handle, and it
+     * needs the label to know what it just got. */
+    const char *(*get_data_channel_label)(void *pDataChannel);
+
     WEBRTC_STATUS (*create_data_channel)(void *pSession,
                                         const char *channelName,
                                         const app_webrtc_data_channel_init_t *pInit,

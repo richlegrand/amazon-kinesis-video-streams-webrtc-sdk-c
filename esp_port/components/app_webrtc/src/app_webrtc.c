@@ -1503,8 +1503,19 @@ CleanUp:
 /**
  * @brief Initialize WebRTC application with the given configuration
  */
-static app_webrtc_data_channel_init_t gDataChannelInit;
-static bool gDataChannelInitSet;
+/* Channels declared before any session exists.
+ *
+ * The pre-offer window below is the only place a data channel can still reach
+ * the SDP, and it runs before the application has a peer id -- so channels
+ * cannot be created on demand, only declared in advance. */
+#define APP_WEBRTC_MAX_DECLARED_CHANNELS 4
+typedef struct {
+    char label[32];
+    app_webrtc_data_channel_init_t init;
+    bool init_set;
+} app_declared_channel_t;
+static app_declared_channel_t gDeclaredChannels[APP_WEBRTC_MAX_DECLARED_CHANNELS];
+static UINT32 gDeclaredChannelCount;
 
 WEBRTC_STATUS app_webrtc_init(app_webrtc_config_t *config)
 {
@@ -2113,14 +2124,24 @@ int app_webrtc_trigger_offer(char *pPeerId)
         if (gWebRtcAppConfig.video_capture == NULL &&
             gWebRtcAppConfig.audio_capture == NULL &&
             pc_interface->create_data_channel != NULL) {
-            void *dc_handle = NULL;
-            WEBRTC_STATUS dc_status = pc_interface->create_data_channel(
-                session_handle, "bitbang",
-                gDataChannelInitSet ? &gDataChannelInit : NULL, &dc_handle);
-            if (dc_status != WEBRTC_STATUS_SUCCESS) {
-                ESP_LOGE("app_webrtc", "create_data_channel failed: 0x%08x", dc_status);
-            } else {
-                ESP_LOGI("app_webrtc", "data channel created for %s", pPeerId);
+            /* Nothing declared means the historical single channel, so a
+             * caller that never declares anything behaves as before. */
+            if (gDeclaredChannelCount == 0) {
+                app_webrtc_declare_data_channel("bitbang", NULL);
+            }
+            for (UINT32 ci = 0; ci < gDeclaredChannelCount; ci++) {
+                void *dc_handle = NULL;
+                app_declared_channel_t *decl = &gDeclaredChannels[ci];
+                WEBRTC_STATUS dc_status = pc_interface->create_data_channel(
+                    session_handle, decl->label,
+                    decl->init_set ? &decl->init : NULL, &dc_handle);
+                if (dc_status != WEBRTC_STATUS_SUCCESS) {
+                    ESP_LOGE("app_webrtc", "create_data_channel '%s' failed: 0x%08x",
+                             decl->label, dc_status);
+                } else {
+                    ESP_LOGI("app_webrtc", "data channel '%s' created for %s",
+                             decl->label, pPeerId);
+                }
             }
         }
 
@@ -2724,19 +2745,37 @@ static PAppWebRTCSession find_session_by_peer_id(const char *peer_id)
  * call app_webrtc_create_data_channel in time to influence it. Declaring the
  * settings up front is the way to reach it. A single channel for now; a list
  * is what a second one will need. */
-WEBRTC_STATUS app_webrtc_set_data_channel_init(const app_webrtc_data_channel_init_t *pInit)
+WEBRTC_STATUS app_webrtc_declare_data_channel(const char *label,
+                                              const app_webrtc_data_channel_init_t *pInit)
 {
-    if (pInit == NULL) {
-        gDataChannelInitSet = false;
-        return WEBRTC_STATUS_SUCCESS;
+    if (label == NULL || label[0] == '\0') {
+        return WEBRTC_STATUS_NULL_ARG;
     }
-    gDataChannelInit = *pInit;
-    gDataChannelInitSet = true;
-    ESP_LOGI(TAG, "data channel will be %s%s", pInit->ordered ? "ordered" : "unordered",
-             pInit->max_retransmits    ? ", retransmit-limited"
-             : pInit->max_packet_lifetime_ms ? ", lifetime-limited"
-                                       : ", reliable");
+    if (gDeclaredChannelCount >= APP_WEBRTC_MAX_DECLARED_CHANNELS) {
+        ESP_LOGE(TAG, "too many declared data channels");
+        return WEBRTC_STATUS_INVALID_OPERATION;
+    }
+    app_declared_channel_t *decl = &gDeclaredChannels[gDeclaredChannelCount++];
+    strlcpy(decl->label, label, sizeof(decl->label));
+    if (pInit != NULL) {
+        decl->init = *pInit;
+        decl->init_set = true;
+    }
+    ESP_LOGI(TAG, "declared data channel '%s': %s%s", decl->label,
+             (pInit == NULL || pInit->ordered) ? "ordered" : "unordered",
+             (pInit != NULL && pInit->max_retransmits)          ? ", retransmit-limited"
+             : (pInit != NULL && pInit->max_packet_lifetime_ms) ? ", lifetime-limited"
+                                                                : ", reliable");
     return WEBRTC_STATUS_SUCCESS;
+}
+
+const char *app_webrtc_data_channel_label(void *pDataChannel)
+{
+    if (gWebRtcAppConfig.peer_connection_if == NULL ||
+        gWebRtcAppConfig.peer_connection_if->get_data_channel_label == NULL) {
+        return NULL;
+    }
+    return gWebRtcAppConfig.peer_connection_if->get_data_channel_label(pDataChannel);
 }
 
 /**

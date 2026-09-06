@@ -292,12 +292,27 @@ int app_webrtc_send_msg_to_signaling(webrtc_message_t *message);
 int app_webrtc_trigger_offer(char *pPeerId);
 
 /**
- * @brief Declare the settings for the data channel created before the offer.
+ * @brief Declare a data channel to be created before the offer.
  *
- * Must be called before a session starts. Pass NULL to restore the default
- * (ordered and reliable).
+ * Must be called before a session starts: the only window in which a channel
+ * can still reach the SDP runs before the application has a peer id, so
+ * channels are declared in advance rather than created on demand. Declaring
+ * nothing yields the historical single "bitbang" channel.
+ *
+ * @param label  Channel name, matched by the peer and reported by
+ *               app_webrtc_data_channel_label.
+ * @param pInit  Delivery settings, or NULL for ordered and reliable.
  */
-WEBRTC_STATUS app_webrtc_set_data_channel_init(const app_webrtc_data_channel_init_t *pInit);
+WEBRTC_STATUS app_webrtc_declare_data_channel(const char *label,
+                                              const app_webrtc_data_channel_init_t *pInit);
+
+/**
+ * @brief The label of the channel a handle refers to.
+ *
+ * With more than one channel open, the open callback is where the application
+ * learns a handle, and this is how it knows which one it got.
+ */
+const char *app_webrtc_data_channel_label(void *pDataChannel);
 
 /**
  * @brief Create a data channel on the active peer session for @p peer_id.
