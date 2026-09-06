@@ -18,6 +18,8 @@
 #include "platform_utils.h"
 #include "thread.h"
 #include "esp_pthread.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
 
 #ifndef DEFAULT_THREAD_SIZE
 #define DEFAULT_THREAD_SIZE (16 * 1024)
@@ -292,12 +294,24 @@ STATUS defaultCreateThreadPriWithCaps(PTID pThreadId, PCHAR threadName, UINT32 t
     DLOGD("pthread:%s, size:%d requires ram, totalSize:%d, spiSize:%d, internalSize:%d", threadName, threadSize, totalSize - curTotalSize,
           spiSize - curSpiSize, internalSize - curInternalSize);
 #endif
+    if (result != 0) {
+        /* Which thread, how big, and what was actually available. Without the
+         * name and the size this reads as "Failed to create task!" from the
+         * pthread component and says nothing about who asked or for how much,
+         * and the largest free block is what the request is measured against
+         * rather than the total. */
+        ESP_LOGE("kvs_thread", "pthread_create(%s) failed with %d, wanted %u byte stack; "
+                               "internal heap %u free, largest block %u",
+                 threadName != NULL ? threadName : "unnamed", result,
+                 (unsigned) (threadSize == 0 ? DEFAULT_THREAD_SIZE : threadSize),
+                 (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    }
     switch (result) {
         case 0:
             // Successful case
             break;
         case ENOMEM:
-            DLOGE("pthread_create failed with ENOMEM");
             CHK(FALSE, STATUS_NOT_ENOUGH_MEMORY);
         case EAGAIN:
             CHK(FALSE, STATUS_THREAD_NOT_ENOUGH_RESOURCES);
