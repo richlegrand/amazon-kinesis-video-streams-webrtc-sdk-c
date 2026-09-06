@@ -350,6 +350,26 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
                 ESP_LOGW("sctp", "stream %u pr-sctp status unavailable (errno %d)",
                          (unsigned) streamId, errno);
             }
+
+            /* Whether the association is still making forward progress, which
+             * the browser's own counters cannot settle. unackdata climbing
+             * while the wire stays busy means we are retransmitting into a
+             * peer that stopped acknowledging; a peer rwnd of zero means it
+             * is receiving but not draining. */
+            {
+                struct sctp_status st;
+                socklen_t stlen = SIZEOF(st);
+                MEMSET(&st, 0, SIZEOF(st));
+                if (usrsctp_getsockopt(pSctpSession->socket, IPPROTO_SCTP, SCTP_STATUS, &st, &stlen) == 0) {
+                    ESP_LOGW("sctp", "assoc: state %d, rwnd %u, unacked %u chunks, pending %u, cwnd %u, srtt %u ms",
+                             (int) st.sstat_state, (unsigned) st.sstat_rwnd,
+                             (unsigned) st.sstat_unackdata, (unsigned) st.sstat_penddata,
+                             (unsigned) st.sstat_primary.spinfo_cwnd,
+                             (unsigned) st.sstat_primary.spinfo_srtt);
+                } else {
+                    ESP_LOGW("sctp", "assoc status unavailable (errno %d)", errno);
+                }
+            }
             prWindow = prNow;
         }
     }
