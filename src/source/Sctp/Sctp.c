@@ -305,6 +305,28 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
         static UINT32 loggedStreams;
         if (streamId < 32 && (loggedStreams & (1u << streamId)) == 0) {
             loggedStreams |= (1u << streamId);
+            /* Whether partial reliability is doing anything. usrsctp counts
+             * messages it gave up on; if a lifetime is set and this stays at
+             * zero, either the peer did not negotiate PR-SCTP or nothing is
+             * sitting in the queue long enough to expire. Reading it is the
+             * only way to tell those apart from outside. */
+            {
+                struct sctp_prstatus pr;
+                socklen_t prlen = SIZEOF(pr);
+                MEMSET(&pr, 0, SIZEOF(pr));
+                pr.sprstat_sid = (UINT16) streamId;
+                pr.sprstat_policy = SCTP_PR_SCTP_TTL;
+                if (usrsctp_getsockopt(pSctpSession->socket, IPPROTO_SCTP, SCTP_PR_ASSOC_STATUS,
+                                       &pr, &prlen) == 0) {
+                    ESP_LOGW("sctp", "pr-sctp abandoned: %llu unsent, %llu sent",
+                             (unsigned long long) pr.sprstat_abandoned_unsent,
+                             (unsigned long long) pr.sprstat_abandoned_sent);
+                } else {
+                    ESP_LOGW("sctp", "pr-sctp status unavailable (errno %d) -- "
+                             "the association may not have negotiated it", errno);
+                }
+            }
+
             ESP_LOGW("sctp", "channel on sctp stream %u: %s%s", (unsigned) streamId,
                      (spa.sendv_sndinfo.snd_flags & SCTP_UNORDERED) ? "unordered" : "ordered",
                      (spa.sendv_flags & SCTP_SEND_PRINFO_VALID)
