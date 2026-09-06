@@ -14,4 +14,22 @@ menu "KVS WebRTC Configuration"
             This enables the use of ESP certificate bundle for CA verification,
             eliminating the need for certificate files on the filesystem.
             Recommended for ESP platforms to avoid certificate management complexity.
+
+    config KVS_TRANSPORT_INSTRUMENTATION
+        bool "Log transport timing and state every few seconds"
+        default n
+        help
+            Periodic reports from the DTLS, ICE and SCTP layers: per-packet
+            encrypt and send timing, connectivity checks offered against
+            answered, the negotiated reliability of each data channel, what
+            partial reliability abandoned, and the association's congestion
+            window, receive window, smoothed RTT and path MTU.
+
+            Off by default because it prints every five seconds on several
+            layers at once and will bury anything else in the log.
+
+            Worth turning on whenever a connection is up but not moving data.
+            The congestion window sitting at exactly one MTU is the signature
+            of every full-size packet being lost, which reads nothing like
+            congestion from the outside and is otherwise slow to find.
 endmenu

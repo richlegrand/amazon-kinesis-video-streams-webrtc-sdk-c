@@ -2,6 +2,7 @@
  * Ice Agent APIs
  */
 #define LOG_CLASS "IceAgent"
+#include "kvs_instrumentation.h"
 #include "../Include_i.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -800,10 +801,14 @@ STATUS iceAgentSendPacket(PIceAgent pIceAgent, PBYTE pBuffer, UINT32 bufferLen)
      * it a thousand-odd times per second, so time both the wait for it and
      * the send itself: it is a candidate both for the send costing four times
      * a bare sendto, and for the peer's checks going unanswered for seconds. */
+#if KVS_INSTR
     int64_t t_enter = esp_timer_get_time();
+#endif
     MUTEX_LOCK(pIceAgent->lock);
     locked = TRUE;
+#if KVS_INSTR
     int64_t t_locked = esp_timer_get_time();
+#endif
 
     /* Do not proceed if ice is shutting down */
     CHK(!ATOMIC_LOAD_BOOL(&pIceAgent->shutdown), retStatus);
@@ -822,9 +827,12 @@ STATUS iceAgentSendPacket(PIceAgent pIceAgent, PBYTE pBuffer, UINT32 bufferLen)
         pTurnConnection = pIceAgent->pDataSendingIceCandidatePair->local->pTurnConnection;
     }
 
+#if KVS_INSTR
     int64_t t_s0 = esp_timer_get_time();
+#endif
     retStatus = iceUtilsSendData(pBuffer, bufferLen, &pIceAgent->pDataSendingIceCandidatePair->remote->ipAddress,
                                  pIceAgent->pDataSendingIceCandidatePair->local->pSocketConnection, pTurnConnection, isRelay);
+#if KVS_INSTR
     {
         static int64_t sumWait, sumSend, windowStart, worstSend;
         static UINT32 n, slow;
@@ -846,14 +854,15 @@ STATUS iceAgentSendPacket(PIceAgent pIceAgent, PBYTE pBuffer, UINT32 bufferLen)
         if (windowStart == 0) {
             windowStart = t_enter;
         } else if (now - windowStart > 5000000) {
-            ESP_LOGW("ice", "send path: lock %.2f ms + socket %.2f ms avg, worst %.1f ms, %u over 2 ms, of %u",
-                     sumWait / 1000.0 / n, sumSend / 1000.0 / n, worstSend / 1000.0,
-                     (unsigned) slow, (unsigned) n);
+            KVS_INSTR_LOGW("ice", "send path: lock %.2f ms + socket %.2f ms avg, worst %.1f ms, %u over 2 ms, of %u",
+                           sumWait / 1000.0 / n, sumSend / 1000.0 / n, worstSend / 1000.0,
+                           (unsigned) slow, (unsigned) n);
             sumWait = sumSend = worstSend = 0;
             n = slow = 0;
             windowStart = now;
         }
     }
+#endif
 
     if (STATUS_FAILED(retStatus)) {
         DLOGW("iceUtilsSendData failed with 0x%08x", retStatus);
@@ -2781,6 +2790,7 @@ STATUS handleStunPacket(PIceAgent pIceAgent, PBYTE pBuffer, UINT32 bufferLen, PS
              * together rather than a burst after a stall. Fine for
              * watching a trend, not a place to draw a conclusion from a
              * single window. */
+#if KVS_INSTR
             static UINT64 lastReq, lastReport;
             static UINT64 worstGap, bestGap, worstReply, replySum;
             static UINT32 reqCount, replyCount;
@@ -2796,6 +2806,7 @@ STATUS handleStunPacket(PIceAgent pIceAgent, PBYTE pBuffer, UINT32 bufferLen, PS
             }
             lastReq = reqAt;
             reqCount++;
+#endif
 
             connectivityCheckRequestsReceived++;
             CHK_STATUS(deserializeStunPacket(pBuffer, bufferLen, (PBYTE) pIceAgent->localPassword,
@@ -2816,6 +2827,7 @@ STATUS handleStunPacket(PIceAgent pIceAgent, PBYTE pBuffer, UINT32 bufferLen, PS
                                               (UINT32) STRLEN(pIceAgent->localPassword) * SIZEOF(CHAR), pIceAgent, pIceCandidate, pSrcAddr));
 
             connectivityCheckResponsesSent++;
+#if KVS_INSTR
             {
                 UINT64 replyIn = GETTIME() - reqAt;
                 replySum += replyIn;
@@ -2826,7 +2838,7 @@ STATUS handleStunPacket(PIceAgent pIceAgent, PBYTE pBuffer, UINT32 bufferLen, PS
                 if (lastReport == 0) {
                     lastReport = reqAt;
                 } else if (reqAt - lastReport > 10 * HUNDREDS_OF_NANOS_IN_A_SECOND) {
-                    ESP_LOGW("ice", "peer checks: %u in %llus, answered %u, gap %llu-%llums,"
+                    KVS_INSTR_LOGW("ice", "peer checks: %u in %llus, answered %u, gap %llu-%llums,"
                              " reply avg %llums worst %llums",
                              (unsigned) reqCount,
                              (unsigned long long) ((reqAt - lastReport) / HUNDREDS_OF_NANOS_IN_A_SECOND),
@@ -2840,6 +2852,7 @@ STATUS handleStunPacket(PIceAgent pIceAgent, PBYTE pBuffer, UINT32 bufferLen, PS
                     worstGap = bestGap = worstReply = replySum = 0;
                 }
             }
+#endif
             // return early if there is no candidate pair. This can happen when we get connectivity check from the peer
             // before we receive the answer.
             CHK_STATUS(findIceCandidatePairWithLocalSocketConnectionAndRemoteAddr(pIceAgent, pSocketConnection, pSrcAddr, TRUE, &pIceCandidatePair));
@@ -2852,7 +2865,7 @@ STATUS handleStunPacket(PIceAgent pIceAgent, PBYTE pBuffer, UINT32 bufferLen, PS
                     /* ESP_LOGW: which pair won decides what any throughput
                      * number means. A relayed path and a direct one are not
                      * the same measurement, and at DLOGI this was invisible. */
-                    ESP_LOGW("ice", "nominated pair: local %s (%s:%s)",
+                    KVS_INSTR_LOGW("ice", "nominated pair: local %s (%s:%s)",
                              iceAgentGetCandidateTypeStr(pIceCandidatePair->local->iceCandidateType),
                              pIceCandidatePair->local->id, pIceCandidatePair->remote->id);
                     pIceCandidatePair->nominated = TRUE;

@@ -5,6 +5,7 @@
 #include "../Include_i.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "kvs_instrumentation.h"
 
 STATUS createConnectionListener(PConnectionListener* ppConnectionListener)
 {
@@ -271,11 +272,13 @@ STATUS connectionListenerStart(PConnectionListener pConnectionListener)
         /* Say where the stack came from, so a run can be attributed without
          * trusting which binary was flashed. Internal drops by the stack size
          * when it comes from there and barely moves when it does not. */
+#if KVS_INSTR
         SIZE_T beforeInternal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+#endif
         CHK_STATUS(CONN_LISTENER_THREAD_CREATE(&pConnectionListener->receiveDataRoutine, "connListener",
                    CONN_LISTENER_THREAD_STACK_SIZE, TRUE, connectionListenerReceiveDataRoutine,
                    CONN_LISTENER_THREAD_PRIORITY, (PVOID) pConnectionListener));
-        ESP_LOGW("ice", "connListener stack: %s, %u KB; internal free %u -> %u, largest block %u",
+        KVS_INSTR_LOGW("ice", "connListener stack: %s, %u KB; internal free %u -> %u, largest block %u",
                  CONN_LISTENER_STACK_IN_PSRAM ? "PSRAM" : "internal",
                  (unsigned) (CONN_LISTENER_THREAD_STACK_SIZE / 1024),
                  (unsigned) beforeInternal,

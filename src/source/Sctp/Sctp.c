@@ -1,4 +1,5 @@
 #define LOG_CLASS "SCTP"
+#include "kvs_instrumentation.h"
 #include "../Include_i.h"
 #include "esp_log.h"
 
@@ -344,7 +345,7 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
         static UINT32 loggedStreams;
         if (streamId < 32 && (loggedStreams & (1u << streamId)) == 0) {
             loggedStreams |= (1u << streamId);
-            ESP_LOGW("sctp", "channel on sctp stream %u: %s%s", (unsigned) streamId,
+            KVS_INSTR_LOGW("sctp", "channel on sctp stream %u: %s%s", (unsigned) streamId,
                      (spa.sendv_sndinfo.snd_flags & SCTP_UNORDERED) ? "unordered" : "ordered",
                      (spa.sendv_flags & SCTP_SEND_PRINFO_VALID)
                          ? ((spa.sendv_prinfo.pr_policy == SCTP_PR_SCTP_TTL) ? ", lifetime-limited" : ", retransmit-limited")
@@ -355,6 +356,7 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
     /* What partial reliability actually abandoned, sampled while traffic is
      * flowing. Read once at connection time this is always zero, which says
      * nothing -- the queue has not formed yet. */
+#if KVS_INSTR
     {
         static int64_t prWindow;
         int64_t prNow = GETTIME() / HUNDREDS_OF_NANOS_IN_A_MILLISECOND;
@@ -367,12 +369,12 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
             pr.sprstat_sid = (UINT16) streamId;
             pr.sprstat_policy = SCTP_PR_SCTP_TTL;
             if (usrsctp_getsockopt(pSctpSession->socket, IPPROTO_SCTP, SCTP_PR_ASSOC_STATUS, &pr, &prlen) == 0) {
-                ESP_LOGW("sctp", "stream %u pr-sctp abandoned: %llu unsent, %llu sent",
+                KVS_INSTR_LOGW("sctp", "stream %u pr-sctp abandoned: %llu unsent, %llu sent",
                          (unsigned) streamId,
                          (unsigned long long) pr.sprstat_abandoned_unsent,
                          (unsigned long long) pr.sprstat_abandoned_sent);
             } else {
-                ESP_LOGW("sctp", "stream %u pr-sctp status unavailable (errno %d)",
+                KVS_INSTR_LOGW("sctp", "stream %u pr-sctp status unavailable (errno %d)",
                          (unsigned) streamId, errno);
             }
 
@@ -388,19 +390,20 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
                 if (usrsctp_getsockopt(pSctpSession->socket, IPPROTO_SCTP, SCTP_STATUS, &st, &stlen) == 0) {
                     /* spinfo_mtu is the proof that the MTU option applied.
                      * 1280 means it did not and messages fragment at 1252. */
-                    ESP_LOGW("sctp", "assoc: state %d, rwnd %u, unacked %u chunks, pending %u, cwnd %u, srtt %u ms, mtu %u",
+                    KVS_INSTR_LOGW("sctp", "assoc: state %d, rwnd %u, unacked %u chunks, pending %u, cwnd %u, srtt %u ms, mtu %u",
                              (int) st.sstat_state, (unsigned) st.sstat_rwnd,
                              (unsigned) st.sstat_unackdata, (unsigned) st.sstat_penddata,
                              (unsigned) st.sstat_primary.spinfo_cwnd,
                              (unsigned) st.sstat_primary.spinfo_srtt,
                              (unsigned) st.sstat_primary.spinfo_mtu);
                 } else {
-                    ESP_LOGW("sctp", "assoc status unavailable (errno %d)", errno);
+                    KVS_INSTR_LOGW("sctp", "assoc status unavailable (errno %d)", errno);
                 }
             }
             prWindow = prNow;
         }
     }
+#endif
 
     /* The socket is non-blocking, so a full send buffer comes back as
      * EWOULDBLOCK rather than as a wait. Returning an error there gives the
