@@ -185,6 +185,20 @@ WEBRTC_STATUS app_webrtc_run(void);
  */
 WEBRTC_STATUS app_webrtc_terminate(void);
 
+/**
+ * @brief End one peer's session and free its slot
+ *
+ * Marks the session for cleanup and wakes the reaper, the same path a
+ * failed or disconnected peer takes. Use when the application can tell a
+ * peer is gone before the transport can: a peer that stops reading is only
+ * detected by ICE consent failing, which took 30 to 60 seconds and held one
+ * of the very few session slots for all of it.
+ *
+ * @param[in] peer_id The peer whose session should be ended
+ * @return WEBRTC_STATUS_SUCCESS if a session was found and marked
+ */
+WEBRTC_STATUS app_webrtc_close_peer(const char *peer_id);
+
 
 /********************************************************************************
  *                      Advanced Configuration APIs                             *

@@ -46,7 +46,23 @@
 #define SCTP_TIMER_THREAD_STACK_SIZE (8 * 1024)
 
 #define SCTP_SEND_BUFFER_RETRY_MS    2
-#define SCTP_SEND_BUFFER_MAX_WAIT_MS 5000
+
+/* How long a send waits for buffer space before giving up on the message.
+ *
+ * Two answers, because the right one depends on what the channel carries.
+ *
+ * An ordered channel is carrying a stream -- an HTTP response here -- where
+ * dropping a message in the middle truncates it and the receiver has no way
+ * to recover. Waiting a long time is the least bad option.
+ *
+ * An unordered channel is carrying whole units that go stale. A video frame is
+ * worthless a few hundred milliseconds late, so waiting seconds for one is
+ * incoherent: it neither delivers anything useful nor lets the next frame
+ * through. It also blocks every other viewer, since one sender fans a frame
+ * out to all of them in turn -- a phone that stopped reading held a second
+ * browser at one frame per five seconds for half a minute. */
+#define SCTP_SEND_BUFFER_MAX_WAIT_MS           5000
+#define SCTP_SEND_BUFFER_MAX_WAIT_UNORDERED_MS 250
 
 #pragma once
 

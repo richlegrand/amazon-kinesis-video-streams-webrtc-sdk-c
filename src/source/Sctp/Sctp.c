@@ -418,6 +418,10 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
     {
         INT32 sent;
         UINT32 waitedMs = 0;
+        /* Derived from the channel, not fixed: see SCTP_SEND_BUFFER_MAX_WAIT_MS. */
+        UINT32 maxWaitMs = (pRtcDataChannelInit != NULL && !pRtcDataChannelInit->ordered)
+            ? SCTP_SEND_BUFFER_MAX_WAIT_UNORDERED_MS
+            : SCTP_SEND_BUFFER_MAX_WAIT_MS;
         for (;;) {
             sent = usrsctp_sendv(pSctpSession->socket, pMessage, pMessageLen, NULL, 0, &spa,
                                  SIZEOF(spa), SCTP_SENDV_SPA, 0);
@@ -427,7 +431,7 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
             if (errno != EWOULDBLOCK && errno != EAGAIN) {
                 break;
             }
-            if (waitedMs >= SCTP_SEND_BUFFER_MAX_WAIT_MS) {
+            if (waitedMs >= maxWaitMs) {
                 UINT32 rwnd = 0, unacked = 0;
                 sctpSessionGetStats(pSctpSession, &rwnd, &unacked);
                 /* ESP_LOGW, not DLOGW: the KVS logger's level is set from

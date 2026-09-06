@@ -2834,6 +2834,34 @@ CleanUp:
     return retStatus;
 }
 
+WEBRTC_STATUS app_webrtc_close_peer(const char *peer_id)
+{
+    PSampleConfiguration pSampleConfiguration = gSampleConfiguration;
+    BOOL found = FALSE;
+
+    if (peer_id == NULL || pSampleConfiguration == NULL) {
+        return WEBRTC_STATUS_NULL_ARG;
+    }
+
+    MUTEX_LOCK(pSampleConfiguration->streamingSessionListReadLock);
+    for (UINT32 i = 0; i < pSampleConfiguration->streamingSessionCount; ++i) {
+        PAppWebRTCSession pSession = pSampleConfiguration->webrtcSessionList[i];
+        if (pSession != NULL && STRCMP(pSession->peerId, peer_id) == 0) {
+            ESP_LOGI(TAG, "Closing session for peer %s at the application's request", peer_id);
+            ATOMIC_STORE_BOOL(&pSession->terminateFlag, TRUE);
+            found = TRUE;
+            break;
+        }
+    }
+    MUTEX_UNLOCK(pSampleConfiguration->streamingSessionListReadLock);
+
+    if (found) {
+        /* Wake the reaper rather than leaving the slot until its next pass. */
+        CVAR_BROADCAST(pSampleConfiguration->cvar);
+    }
+    return found ? WEBRTC_STATUS_SUCCESS : WEBRTC_STATUS_INVALID_ARG;
+}
+
 WEBRTC_STATUS app_webrtc_send_data_channel_message(const char *peer_id,
                                                    void *pDataChannel,
                                                    bool isBinary,
