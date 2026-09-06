@@ -14,20 +14,31 @@
 
 /* Send buffer, in bytes.
  *
- * 32 KB, down from 64. At 64 the throttle landed in different places
- * depending on message size: the benchmark's 16 KB messages self-limited at
- * about 284 KB/s while the camera's 8 KB ones ran to 354, because a large
- * message needs a large contiguous gap in the buffer before it is accepted and
- * so blocks its producer sooner. Message size was acting as a rate control
- * parameter, which is not its job.
+ * This is the throttle. A producer blocks when it cannot get a contiguous gap
+ * here, so the buffer size sets the rate at which the transport will accept
+ * work, and that rate is what determines whether the peer's connectivity
+ * checks survive.
  *
- * Two floors constrain how far this can go, and 32 KB is close to both. A
+ * Measured with the camera, whose messages are 8200 bytes through the HTTP
+ * bridge:
+ *
+ *     64 KB -> 354 KB/s, 23 fps, ICE gaps 3.7 to 7.7 s   (too fast)
+ *     32 KB -> 220 KB/s, 14 fps, ICE gaps at the peer's own cadence
+ *     48 KB -> interpolated near 290, which is where the benchmark's rate
+ *              sweep put the knee
+ *
+ * 64 also made the throttle depend on message size -- the benchmark's 16 KB
+ * messages self-limited at 284 while the camera's 8 KB ones ran to 354,
+ * because a larger message needs a larger gap and so blocks sooner. Smaller
+ * buffers narrow that difference.
+ *
+ * Two floors constrain how far this can go. A
  * message larger than the buffer is refused outright with EMSGSIZE rather than
  * queued, and the largest here is 8200 bytes through the HTTP bridge. And it
  * must exceed the bandwidth-delay product or it caps throughput rather than
  * latency -- roughly 33 KB on a 200 ms path at these rates, so this is at the
  * edge for a remote peer and should be watched there. */
-#define SCTP_SESSION_SNDBUF_BYTES    (32 * 1024)
+#define SCTP_SESSION_SNDBUF_BYTES    (48 * 1024)
 #define SCTP_TIMER_THREAD_STACK_SIZE (8 * 1024)
 
 #define SCTP_SEND_BUFFER_RETRY_MS    2
