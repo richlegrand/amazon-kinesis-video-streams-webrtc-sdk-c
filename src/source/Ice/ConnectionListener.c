@@ -218,9 +218,24 @@ STATUS connectionListenerStart(PConnectionListener pConnectionListener)
     CHK(!IS_VALID_TID_VALUE(pConnectionListener->receiveDataRoutine), retStatus);
 #if CONFIG_IDF_CMAKE
 #define CONN_LISTENER_THREAD_STACK_SIZE (32 * 1024)
-    CHK_STATUS(THREAD_CREATE_EX_EXT(&pConnectionListener->receiveDataRoutine, "connListener",
+/* Above the pthread default of 5, which is where every other KVS thread lands
+ * -- sctpTimer, reconnecter, listener, receiveLwsMsg -- along with whatever
+ * the application runs. FreeRTOS round-robins equal priorities, so at 5 this
+ * task got a share of the CPU rather than precedence.
+ *
+ * It is the task that reads every inbound packet, including the peer's
+ * connectivity checks. When it is not scheduled promptly the socket mailbox
+ * fills and lwIP discards what arrives next, and a lost check eventually reads
+ * as a dead connection. Measured under load before this: Chrome sent 20 checks
+ * and the device saw 10.
+ *
+ * Well below lwIP's tcpip thread (18) and the WiFi task (23), so it cannot
+ * starve the stack feeding it. It blocks in poll() and only runs when there is
+ * something to read, so a high priority costs nothing when idle. */
+#define CONN_LISTENER_THREAD_PRIORITY 10
+    CHK_STATUS(THREAD_CREATE_EX_PRI(&pConnectionListener->receiveDataRoutine, "connListener",
                CONN_LISTENER_THREAD_STACK_SIZE, TRUE, connectionListenerReceiveDataRoutine,
-               (PVOID) pConnectionListener));
+               CONN_LISTENER_THREAD_PRIORITY, (PVOID) pConnectionListener));
 #else
     CHK_STATUS(THREAD_CREATE(&pConnectionListener->receiveDataRoutine, connectionListenerReceiveDataRoutine, (PVOID) pConnectionListener));
 #endif
