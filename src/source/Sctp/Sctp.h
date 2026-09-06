@@ -12,9 +12,22 @@
  * uses 10ms; anything much coarser delays retransmission. */
 #define SCTP_TIMER_INTERVAL_MS       10
 
-/* Send buffer, in bytes. See the note where it is applied: must exceed both
- * the largest message and the bandwidth-delay product. */
-#define SCTP_SESSION_SNDBUF_BYTES    (64 * 1024)
+/* Send buffer, in bytes.
+ *
+ * 32 KB, down from 64. At 64 the throttle landed in different places
+ * depending on message size: the benchmark's 16 KB messages self-limited at
+ * about 284 KB/s while the camera's 8 KB ones ran to 354, because a large
+ * message needs a large contiguous gap in the buffer before it is accepted and
+ * so blocks its producer sooner. Message size was acting as a rate control
+ * parameter, which is not its job.
+ *
+ * Two floors constrain how far this can go, and 32 KB is close to both. A
+ * message larger than the buffer is refused outright with EMSGSIZE rather than
+ * queued, and the largest here is 8200 bytes through the HTTP bridge. And it
+ * must exceed the bandwidth-delay product or it caps throughput rather than
+ * latency -- roughly 33 KB on a 200 ms path at these rates, so this is at the
+ * edge for a remote peer and should be watched there. */
+#define SCTP_SESSION_SNDBUF_BYTES    (32 * 1024)
 #define SCTP_TIMER_THREAD_STACK_SIZE (8 * 1024)
 
 #define SCTP_SEND_BUFFER_RETRY_MS    2
