@@ -292,6 +292,14 @@ int app_webrtc_send_msg_to_signaling(webrtc_message_t *message);
 int app_webrtc_trigger_offer(char *pPeerId);
 
 /**
+ * @brief Declare the settings for the data channel created before the offer.
+ *
+ * Must be called before a session starts. Pass NULL to restore the default
+ * (ordered and reliable).
+ */
+WEBRTC_STATUS app_webrtc_set_data_channel_init(const app_webrtc_data_channel_init_t *pInit);
+
+/**
  * @brief Create a data channel on the active peer session for @p peer_id.
  *
  * The channel's onOpen callback (from app_webrtc_config_t.data_channel_config

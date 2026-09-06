@@ -1503,6 +1503,9 @@ CleanUp:
 /**
  * @brief Initialize WebRTC application with the given configuration
  */
+static app_webrtc_data_channel_init_t gDataChannelInit;
+static bool gDataChannelInitSet;
+
 WEBRTC_STATUS app_webrtc_init(app_webrtc_config_t *config)
 {
     ENTERS();
@@ -2112,7 +2115,8 @@ int app_webrtc_trigger_offer(char *pPeerId)
             pc_interface->create_data_channel != NULL) {
             void *dc_handle = NULL;
             WEBRTC_STATUS dc_status = pc_interface->create_data_channel(
-                session_handle, "bitbang", NULL, &dc_handle);
+                session_handle, "bitbang",
+                gDataChannelInitSet ? &gDataChannelInit : NULL, &dc_handle);
             if (dc_status != WEBRTC_STATUS_SUCCESS) {
                 ESP_LOGE("app_webrtc", "create_data_channel failed: 0x%08x", dc_status);
             } else {
@@ -2711,6 +2715,28 @@ static PAppWebRTCSession find_session_by_peer_id(const char *peer_id)
     }
     MUTEX_UNLOCK(gSampleConfiguration->streamingSessionListReadLock);
     return match;
+}
+
+/* Settings for the channel created in the pre-offer window above.
+ *
+ * That window is the only place a data channel can still reach the SDP, and it
+ * runs before any application code has a peer id -- so the application cannot
+ * call app_webrtc_create_data_channel in time to influence it. Declaring the
+ * settings up front is the way to reach it. A single channel for now; a list
+ * is what a second one will need. */
+WEBRTC_STATUS app_webrtc_set_data_channel_init(const app_webrtc_data_channel_init_t *pInit)
+{
+    if (pInit == NULL) {
+        gDataChannelInitSet = false;
+        return WEBRTC_STATUS_SUCCESS;
+    }
+    gDataChannelInit = *pInit;
+    gDataChannelInitSet = true;
+    ESP_LOGI(TAG, "data channel will be %s%s", pInit->ordered ? "ordered" : "unordered",
+             pInit->max_retransmits    ? ", retransmit-limited"
+             : pInit->max_packet_lifetime_ms ? ", lifetime-limited"
+                                       : ", reliable");
+    return WEBRTC_STATUS_SUCCESS;
 }
 
 /**

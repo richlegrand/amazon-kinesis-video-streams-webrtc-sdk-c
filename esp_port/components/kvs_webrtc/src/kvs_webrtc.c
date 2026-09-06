@@ -1492,6 +1492,15 @@ static WEBRTC_STATUS kvs_pc_create_data_channel(void *pSession, const char *chan
     dcInit.ordered = (pInit != NULL) ? (pInit->ordered ? TRUE : FALSE) : TRUE;
     NULLABLE_SET_EMPTY(dcInit.maxPacketLifeTime);
     NULLABLE_SET_EMPTY(dcInit.maxRetransmits);
+    /* Carry partial reliability through. These were being zeroed here
+     * regardless of what the caller asked for. */
+    if (pInit != NULL) {
+        if (pInit->max_retransmits != 0) {
+            NULLABLE_SET_VALUE(dcInit.maxRetransmits, pInit->max_retransmits);
+        } else if (pInit->max_packet_lifetime_ms != 0) {
+            NULLABLE_SET_VALUE(dcInit.maxPacketLifeTime, pInit->max_packet_lifetime_ms);
+        }
+    }
 
     CHK_STATUS(createDataChannel(session->peer_connection, (PCHAR)channelName,
                                  &dcInit, &pDataChannel));

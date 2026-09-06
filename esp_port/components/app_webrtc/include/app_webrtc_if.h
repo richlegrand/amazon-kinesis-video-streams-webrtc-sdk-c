@@ -280,6 +280,12 @@ typedef struct {
  */
 typedef struct {
     bool ordered; //!< true for reliable/ordered SCTP semantics
+    /* Partial reliability. At most one should be set; max_retransmits wins if
+     * both are. Zero means "not set", i.e. fully reliable. A lifetime is the
+     * right choice for live media: a message that cannot be delivered inside
+     * the window is abandoned rather than delivered late. */
+    uint16_t max_packet_lifetime_ms;
+    uint16_t max_retransmits;
 } app_webrtc_data_channel_init_t;
 
 /**
