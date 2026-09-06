@@ -37,6 +37,23 @@ STATUS configureSctpSocket(struct socket* socket)
     // delays are introduced, at the cost of more packets in the network.
     CHK(usrsctp_setsockopt(socket, IPPROTO_SCTP, SCTP_NODELAY, &valueOn, SIZEOF(valueOn)) == 0, STATUS_SCTP_SESSION_SETUP_FAILED);
 
+    /* usrsctp defaults this to SB_MAX, 256 KB, which is a desktop number. At
+     * the rate this link carries that is most of a second of data buffered
+     * ahead of the wire, and for live video buffered means stale.
+     *
+     * 64 KB is about a fifth of a second. Two floors it has to clear: a
+     * message larger than the buffer is refused outright with EMSGSIZE rather
+     * than queued (sctp_output.c, "It will NEVER fit"), and the buffer must
+     * exceed the bandwidth-delay product or it caps throughput instead of just
+     * latency -- roughly 33 KB on a 200 ms path at this rate. 64 KB clears
+     * both with room. */
+    {
+        INT32 sndBuf = SCTP_SESSION_SNDBUF_BYTES;
+        if (usrsctp_setsockopt(socket, SOL_SOCKET, SO_SNDBUF, &sndBuf, SIZEOF(sndBuf)) != 0) {
+            DLOGW("could not set SO_SNDBUF");
+        }
+    }
+
     MEMSET(&event, 0, SIZEOF(event));
     event.se_assoc_id = SCTP_FUTURE_ASSOC;
     event.se_on = 1;

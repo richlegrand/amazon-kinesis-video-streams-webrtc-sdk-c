@@ -11,6 +11,10 @@
 /* How often usrsctp_handle_timers is driven. usrsctp's own timer thread
  * uses 10ms; anything much coarser delays retransmission. */
 #define SCTP_TIMER_INTERVAL_MS       10
+
+/* Send buffer, in bytes. See the note where it is applied: must exceed both
+ * the largest message and the bandwidth-delay product. */
+#define SCTP_SESSION_SNDBUF_BYTES    (64 * 1024)
 #define SCTP_TIMER_THREAD_STACK_SIZE (8 * 1024)
 
 #define SCTP_SEND_BUFFER_RETRY_MS    2
