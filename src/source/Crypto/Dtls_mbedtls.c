@@ -1,5 +1,7 @@
 #define LOG_CLASS "DTLS_mbedtls"
 #include "../Include_i.h"
+#include "esp_log.h"
+#include "esp_timer.h"
 
 /**  https://tools.ietf.org/html/rfc5764#section-4.1.2 */
 mbedtls_ssl_srtp_profile DTLS_SRTP_SUPPORTED_PROFILES[] = {
@@ -436,8 +438,17 @@ STATUS dtlsSessionPutApplicationData(PDtlsSession pDtlsSession, PBYTE pData, INT
     CHK(pData != NULL, STATUS_NULL_ARG);
     CHK(!ATOMIC_LOAD_BOOL(&pDtlsSession->isShutdown), retStatus);
 
+    /* Where the time goes on the outbound path. Raw UDP to the same host
+     * costs about 210 us per 1100-byte datagram; this path costs about 5.9 ms,
+     * and nothing so far says which layer holds the difference. Three
+     * brackets split it: waiting for the lock, inside mbedtls_ssl_write
+     * (crypto plus the UDP send beneath it), and whatever is left over. */
+    int64_t dtlsWriteUs = 0;
+    int64_t t_enter = esp_timer_get_time();
+
     MUTEX_LOCK(pDtlsSession->sslLock);
     locked = TRUE;
+    int64_t t_locked = esp_timer_get_time();
 
     /* Splitting here is wrong for anything datagram-oriented: SCTP expects
      * one packet per record, and a peer receiving half of one discards it.
@@ -452,7 +463,9 @@ STATUS dtlsSessionPutApplicationData(PDtlsSession pDtlsSession, PBYTE pData, INT
     while (iterate && writtenBytes < dataLen) {
         // In Dtls, we need to make sure that the packet is smaller than the mtu or MBEDTLS_SSL_OUT_CONTENT_LEN constant
         writeLen = MIN(dataLen - writtenBytes, mbedtls_ssl_get_max_out_record_payload(&pDtlsSession->sslCtx));
+        int64_t t_w0 = esp_timer_get_time();
         sslRet = mbedtls_ssl_write(&pDtlsSession->sslCtx, pData + writtenBytes, writeLen);
+        dtlsWriteUs += esp_timer_get_time() - t_w0;
         if (sslRet > 0) {
             writtenBytes += sslRet;
         } else if (sslRet == MBEDTLS_ERR_SSL_WANT_READ || sslRet == MBEDTLS_ERR_SSL_WANT_WRITE) {
@@ -462,6 +475,28 @@ STATUS dtlsSessionPutApplicationData(PDtlsSession pDtlsSession, PBYTE pData, INT
             writtenBytes = 0;
             retStatus = STATUS_INTERNAL_ERROR;
             iterate = FALSE;
+        }
+    }
+
+    {
+        /* Accumulated and reported every few seconds; logging per packet would
+         * cost more than the thing being measured. */
+        static int64_t sumLock, sumWrite, sumTotal, windowStart;
+        static UINT32 packets;
+        int64_t now = esp_timer_get_time();
+        sumLock += t_locked - t_enter;
+        sumWrite += dtlsWriteUs;
+        sumTotal += now - t_enter;
+        packets++;
+        if (windowStart == 0) {
+            windowStart = t_enter;
+        } else if (now - windowStart > 5000000) {
+            ESP_LOGW("dtls", "%u packets: %.2f ms each = %.2f lock + %.2f ssl_write + %.2f other",
+                     (unsigned) packets, sumTotal / 1000.0 / packets, sumLock / 1000.0 / packets,
+                     sumWrite / 1000.0 / packets, (sumTotal - sumLock - sumWrite) / 1000.0 / packets);
+            sumLock = sumWrite = sumTotal = 0;
+            packets = 0;
+            windowStart = now;
         }
     }
 
