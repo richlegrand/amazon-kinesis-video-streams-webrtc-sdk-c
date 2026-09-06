@@ -4,6 +4,7 @@
 #define LOG_CLASS "IceAgent"
 #include "../Include_i.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 // https://developer.mozilla.org/en-US/docs/Web/API/RTCIceCandidate/candidate
 // https://tools.ietf.org/html/rfc5245#section-15.1
@@ -794,8 +795,15 @@ STATUS iceAgentSendPacket(PIceAgent pIceAgent, PBYTE pBuffer, UINT32 bufferLen)
     CHK(pIceAgent != NULL && pBuffer != NULL, STATUS_NULL_ARG);
     CHK(bufferLen != 0, STATUS_INVALID_ARG);
 
+    /* This lock is also held by the ICE state machine and by the code that
+     * answers the peer's connectivity checks. Under load the data path takes
+     * it a thousand-odd times per second, so time both the wait for it and
+     * the send itself: it is a candidate both for the send costing four times
+     * a bare sendto, and for the peer's checks going unanswered for seconds. */
+    int64_t t_enter = esp_timer_get_time();
     MUTEX_LOCK(pIceAgent->lock);
     locked = TRUE;
+    int64_t t_locked = esp_timer_get_time();
 
     /* Do not proceed if ice is shutting down */
     CHK(!ATOMIC_LOAD_BOOL(&pIceAgent->shutdown), retStatus);
@@ -814,8 +822,26 @@ STATUS iceAgentSendPacket(PIceAgent pIceAgent, PBYTE pBuffer, UINT32 bufferLen)
         pTurnConnection = pIceAgent->pDataSendingIceCandidatePair->local->pTurnConnection;
     }
 
+    int64_t t_s0 = esp_timer_get_time();
     retStatus = iceUtilsSendData(pBuffer, bufferLen, &pIceAgent->pDataSendingIceCandidatePair->remote->ipAddress,
                                  pIceAgent->pDataSendingIceCandidatePair->local->pSocketConnection, pTurnConnection, isRelay);
+    {
+        static int64_t sumWait, sumSend, windowStart;
+        static UINT32 n;
+        int64_t now = esp_timer_get_time();
+        sumWait += t_locked - t_enter;
+        sumSend += now - t_s0;
+        n++;
+        if (windowStart == 0) {
+            windowStart = t_enter;
+        } else if (now - windowStart > 5000000) {
+            ESP_LOGW("ice", "send path: %.2f ms waiting for the agent lock + %.2f ms in the socket, over %u packets",
+                     sumWait / 1000.0 / n, sumSend / 1000.0 / n, (unsigned) n);
+            sumWait = sumSend = 0;
+            n = 0;
+            windowStart = now;
+        }
+    }
 
     if (STATUS_FAILED(retStatus)) {
         DLOGW("iceUtilsSendData failed with 0x%08x", retStatus);
