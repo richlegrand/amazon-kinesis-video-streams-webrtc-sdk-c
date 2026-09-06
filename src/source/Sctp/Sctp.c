@@ -37,6 +37,24 @@ STATUS configureSctpSocket(struct socket* socket)
     // delays are introduced, at the cost of more packets in the network.
     CHK(usrsctp_setsockopt(socket, IPPROTO_SCTP, SCTP_NODELAY, &valueOn, SIZEOF(valueOn)) == 0, STATUS_SCTP_SESSION_SETUP_FAILED);
 
+    /* Cap how much goes out in one go.
+     *
+     * Measured: connectivity checks from the peer survive fine while messages
+     * are 4 KB or less, and 45% to 57% of them vanish once messages reach 8 KB.
+     * A 32 KB message is 26 SCTP packets emitted back to back, and nothing
+     * reaches the device while that train is on the air.
+     *
+     * The default is already 4 (SCTP_DEF_MAX_BURST), but it bounds output
+     * cycles rather than packets per cycle, and each cycle drains as much as
+     * cwnd allows -- which on a clean LAN is everything. Whether tightening it
+     * changes the shape on the wire is exactly what this is testing. */
+    {
+        UINT32 maxBurst = SCTP_SESSION_MAX_BURST;
+        if (usrsctp_setsockopt(socket, IPPROTO_SCTP, SCTP_MAX_BURST, &maxBurst, SIZEOF(maxBurst)) != 0) {
+            DLOGW("could not set SCTP_MAX_BURST");
+        }
+    }
+
     MEMSET(&event, 0, SIZEOF(event));
     event.se_assoc_id = SCTP_FUTURE_ASSOC;
     event.se_on = 1;
