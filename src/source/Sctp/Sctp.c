@@ -298,6 +298,75 @@ CleanUp:
     return retStatus;
 }
 
+#ifdef SCTP_TCB_LOCK_TIMING
+#include <pthread.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+/* Association-lock contention, split by who waited.
+ *
+ * Every data channel shares one association and therefore one mutex, so a
+ * sender inside usrsctp_sendv and a receiver processing a SACK block each
+ * other. Waiting costs no CPU, so per-task accounting cannot see it, and it is
+ * indistinguishable from work in a wall-clock bracket. Measured here: only a
+ * genuine wait is timed, an uncontended acquisition costs one trylock. */
+static struct {
+    /* Only touched while the mutex is held, so these need no atomics: the
+     * lock being measured is what serializes them. An earlier version also
+     * counted every acquisition, incremented before the lock and therefore
+     * racing -- it read 278/s while the contended counts summed to 421/s,
+     * which is impossible. Anything counted outside the lock needs an atomic
+     * or it is fiction. */
+    UINT64 waitUsRx, waitUsTx;
+    UINT32 hitsRx, hitsTx, worstUs;
+    int64_t window;
+} gLockStats;
+
+VOID sctpTcbLockTimed(pthread_mutex_t *pMutex)
+{
+    if (pthread_mutex_trylock(pMutex) == 0) {
+        return;
+    }
+
+    int64_t t0 = esp_timer_get_time();
+    (VOID) pthread_mutex_lock(pMutex);
+    UINT32 waited = (UINT32) (esp_timer_get_time() - t0);
+
+    /* connListener is the inbound thread; anything else asking for this lock
+     * while it is held is, in this workload, the sender. */
+    const char *name = pcTaskGetName(NULL);
+    if (name != NULL && name[0] == 'c' && name[1] == 'o' && name[2] == 'n' && name[3] == 'n') {
+        gLockStats.waitUsRx += waited;
+        gLockStats.hitsRx++;
+    } else {
+        gLockStats.waitUsTx += waited;
+        gLockStats.hitsTx++;
+    }
+    if (waited > gLockStats.worstUs) {
+        gLockStats.worstUs = waited;
+    }
+}
+
+static VOID sctpReportLockStats(VOID)
+{
+    int64_t now = esp_timer_get_time();
+    if (gLockStats.window == 0) {
+        gLockStats.window = now;
+        return;
+    }
+    if (now - gLockStats.window < 5000000) {
+        return;
+    }
+    double secs = (now - gLockStats.window) / 1e6;
+    ESP_LOGW("sctp", "assoc lock: contended rx %u (%.1f ms/s), tx %u (%.1f ms/s), worst %u us",
+             (unsigned) gLockStats.hitsRx, gLockStats.waitUsRx / 1000.0 / secs,
+             (unsigned) gLockStats.hitsTx, gLockStats.waitUsTx / 1000.0 / secs,
+             (unsigned) gLockStats.worstUs);
+    MEMSET(&gLockStats, 0x00, SIZEOF(gLockStats));
+    gLockStats.window = now;
+}
+#endif
+
 STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL isBinary, PBYTE pMessage, UINT32 pMessageLen,
                                PRtcDataChannelInit pRtcDataChannelInit)
 {
@@ -356,6 +425,9 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
     /* What partial reliability actually abandoned, sampled while traffic is
      * flowing. Read once at connection time this is always zero, which says
      * nothing -- the queue has not formed yet. */
+#ifdef SCTP_TCB_LOCK_TIMING
+    sctpReportLockStats();
+#endif
 #if KVS_INSTR
     {
         static int64_t prWindow;

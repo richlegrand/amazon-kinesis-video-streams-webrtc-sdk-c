@@ -216,3 +216,9 @@ endif()
 # truncation is intended there, so the warning is downgraded for this
 # component only -- our own components keep it fatal.
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-error=stringop-truncation)
+
+# Matches esp_usrsctp: the timed association lock is declared in usrsctp's
+# headers and implemented here, so both sides need the same define.
+if(CONFIG_KVS_TRANSPORT_INSTRUMENTATION)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC SCTP_TCB_LOCK_TIMING)
+endif()

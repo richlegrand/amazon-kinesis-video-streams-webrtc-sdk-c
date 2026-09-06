@@ -29,6 +29,12 @@ endif()
 # Add definitions needed by usrsctp
 add_definitions(-D__Userspace__)
 add_definitions(-DSCTP_PROCESS_LEVEL_LOCKS)
+# Time waits on the association mutex. Contention costs no CPU, so per-task
+# accounting cannot see it; this is the only way to know whether the sender and
+# the receiver are blocking each other. Implemented in the fork's Sctp.c.
+if(CONFIG_KVS_TRANSPORT_INSTRUMENTATION)
+    add_definitions(-DSCTP_TCB_LOCK_TIMING)
+endif()
 add_definitions(-DSCTP_SIMPLE_ALLOCATOR)
 add_definitions(-DHAVE_SYS_QUEUE_H)
 add_definitions(-DHAVE_STDATOMIC_H)

@@ -408,8 +408,14 @@ PVOID connectionListenerReceiveDataRoutine(PVOID arg)
                     if (canReadFd(localSocket, rfds, nfds)) {
                         iterate = TRUE;
                         while (iterate) {
+#if KVS_INSTR
+                            int64_t t_recv0 = esp_timer_get_time();
+#endif
                             readLen = recvfrom(localSocket, pConnectionListener->pBuffer, pConnectionListener->bufferLen, 0,
                                                (struct sockaddr*) &srcAddrBuff, &srcAddrBuffLen);
+#if KVS_INSTR
+                            int64_t t_recv1 = esp_timer_get_time();
+#endif
                             if (readLen < 0) {
                                 switch (getErrorCode()) {
                                     case EWOULDBLOCK:
@@ -431,6 +437,10 @@ PVOID connectionListenerReceiveDataRoutine(PVOID arg)
                                         * and get the decrypted data length. */
                                        STATUS_SUCCEEDED(socketConnectionReadData(pSocketConnection, pConnectionListener->pBuffer,
                                                                                  pConnectionListener->bufferLen, (PUINT32) &readLen))) {
+#if KVS_INSTR
+                                /* The decrypt happened inside the condition above. */
+                                int64_t t_decrypted = esp_timer_get_time();
+#endif
                                 if (pSocketConnection->protocol == KVS_SOCKET_PROTOCOL_UDP) {
                                     if (srcAddrBuff.ss_family == AF_INET) {
                                         srcAddr.family = KVS_IP_FAMILY_TYPE_IPV4;
@@ -456,6 +466,37 @@ PVOID connectionListenerReceiveDataRoutine(PVOID arg)
                                                                                pConnectionListener->pBuffer, (UINT32) readLen, pSrcAddr,
                                                                                NULL); // no dest information available right now.
                                 }
+#if KVS_INSTR
+                                /* Where the inbound millisecond and a half goes.
+                                 *
+                                 * connListener is 29% of all CPU while doing nothing but taking
+                                 * SACKs, at ~1.8 us per packet, and that cost does not move when
+                                 * cwnd changes by a factor of ten -- so it is not the SACK walking
+                                 * the retransmission queue. Three brackets split what is left: the
+                                 * socket read, the DTLS decrypt, and everything usrsctp does with
+                                 * the result. */
+                                {
+                                    static int64_t sumRecv, sumDecrypt, sumSctp, windowStart;
+                                    static UINT32 packets;
+                                    int64_t now = esp_timer_get_time();
+                                    sumRecv += t_recv1 - t_recv0;
+                                    sumDecrypt += t_decrypted - t_recv1;
+                                    sumSctp += now - t_decrypted;
+                                    packets++;
+                                    if (windowStart == 0) {
+                                        windowStart = t_recv0;
+                                    } else if (now - windowStart > 5000000) {
+                                        ESP_LOGW("ice", "inbound %u packets: %.2f ms each = %.2f recvfrom + %.2f decrypt + %.2f sctp",
+                                                 (unsigned) packets,
+                                                 (sumRecv + sumDecrypt + sumSctp) / 1000.0 / packets,
+                                                 sumRecv / 1000.0 / packets, sumDecrypt / 1000.0 / packets,
+                                                 sumSctp / 1000.0 / packets);
+                                        sumRecv = sumDecrypt = sumSctp = 0;
+                                        packets = 0;
+                                        windowStart = now;
+                                    }
+                                }
+#endif
                             }
 
                             // reset srcAddrBuffLen to actual size
