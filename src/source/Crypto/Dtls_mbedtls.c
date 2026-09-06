@@ -125,6 +125,18 @@ INT32 dtlsSessionSendCallback(PVOID customData, const unsigned char* pBuf, ULONG
      * 210 us, and if this costs far more then the packet is not being held
      * up by crypto at all. */
     {
+        /* pBuf is mbedtls's own out_buf, so its address says which RAM the
+         * record was encrypted into. Internal SRAM is 0x3fc..., PSRAM is
+         * 0x3c... -- and PSRAM would explain a cost that does not respond to
+         * the cipher, the GHASH table, or the load. */
+        static BOOL reported;
+        if (!reported) {
+            reported = TRUE;
+            ESP_LOGW("dtls", "record buffer at %p (%s RAM)", (void *) pBuf,
+                     ((uintptr_t) pBuf >> 24) == 0x3f ? "internal" : "external");
+        }
+    }
+    {
         static int64_t sumSend, windowStart;
         static UINT32 packets;
         int64_t t0 = esp_timer_get_time();
