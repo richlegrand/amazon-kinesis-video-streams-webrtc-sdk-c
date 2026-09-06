@@ -2811,9 +2811,12 @@ STATUS handleStunPacket(PIceAgent pIceAgent, PBYTE pBuffer, UINT32 bufferLen, PS
             if (!pIceCandidatePair->nominated) {
                 CHK_STATUS(getStunAttribute(pStunPacket, STUN_ATTRIBUTE_TYPE_USE_CANDIDATE, &pStunAttr));
                 if (pStunAttr != NULL) {
-                    DLOGI("received candidate with USE_CANDIDATE flag, local candidate type %s(%s:%s).",
-                          iceAgentGetCandidateTypeStr(pIceCandidatePair->local->iceCandidateType), pIceCandidatePair->local->id,
-                          pIceCandidatePair->remote->id);
+                    /* ESP_LOGW: which pair won decides what any throughput
+                     * number means. A relayed path and a direct one are not
+                     * the same measurement, and at DLOGI this was invisible. */
+                    ESP_LOGW("ice", "nominated pair: local %s (%s:%s)",
+                             iceAgentGetCandidateTypeStr(pIceCandidatePair->local->iceCandidateType),
+                             pIceCandidatePair->local->id, pIceCandidatePair->remote->id);
                     pIceCandidatePair->nominated = TRUE;
                 }
             }
