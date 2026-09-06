@@ -2847,7 +2847,18 @@ WEBRTC_STATUS app_webrtc_send_data_channel_message(const char *peer_id,
     MUTEX_UNLOCK(gSampleConfiguration->streamingSessionListReadLock);
 
     if (pStreamingSession == NULL) {
-        ESP_LOGE(TAG, "No streaming session found for peer: %s", peer_id);
+        /* Say it once per peer. A sender that has not yet noticed the session
+         * is gone keeps calling at its own rate -- a camera at 25 frames a
+         * second turns this into two error lines per frame, and the log stops
+         * being usable exactly when something worth reading is in it. The
+         * caller still gets STATUS_INVALID_ARG on every call and can act on
+         * it; only the repeat is dropped. */
+        static char lastMissingPeer[APP_WEBRTC_MAX_SIGNALING_CLIENT_ID_LEN + 1];
+        if (STRNCMP(lastMissingPeer, peer_id, SIZEOF(lastMissingPeer)) != 0) {
+            STRNCPY(lastMissingPeer, peer_id, SIZEOF(lastMissingPeer) - 1);
+            lastMissingPeer[SIZEOF(lastMissingPeer) - 1] = '\0';
+            ESP_LOGE(TAG, "No streaming session found for peer: %s", peer_id);
+        }
         CHK(FALSE, STATUS_INVALID_ARG);
     }
 

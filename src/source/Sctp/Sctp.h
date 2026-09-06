@@ -74,7 +74,19 @@ extern "C" {
  * Small messages fit in one packet and survived, so this only appeared
  * once a message was large enough for usrsctp to fragment. 1100 leaves
  * room for ciphersuites with more overhead than GCM. */
-#define SCTP_MTU                         1360
+/* Sized for the worst path, not the best. A relayed cellular connection
+ * carries, per packet: 28 bytes of IP and UDP to the relay, up to 36 for a
+ * TURN Send indication, and about 29 of DTLS record overhead. At 1360 that
+ * totals 1453 and does not fit a 1400 byte cellular MTU -- every full-size
+ * packet is lost, cwnd sits at one MTU, and nothing streams while small
+ * messages still get through. Path MTU discovery is disabled here, so
+ * nothing adapts.
+ *
+ * 1200 is what libwebrtc uses for SCTP over DTLS, and for the same reason:
+ * it clears a 1280 byte path with room for every layer above. It costs
+ * about 12% of the payload per packet on a LAN, which is the price of
+ * working on every path rather than the fastest one. */
+#define SCTP_MTU                         1200
 #define SCTP_ASSOCIATION_DEFAULT_PORT    5000
 #define SCTP_DCEP_HEADER_LENGTH          12
 #define SCTP_DCEP_LABEL_LEN_OFFSET       8
