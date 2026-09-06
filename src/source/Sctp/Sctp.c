@@ -37,6 +37,31 @@ STATUS configureSctpSocket(struct socket* socket)
     // delays are introduced, at the cost of more packets in the network.
     CHK(usrsctp_setsockopt(socket, IPPROTO_SCTP, SCTP_NODELAY, &valueOn, SIZEOF(valueOn)) == 0, STATUS_SCTP_SESSION_SETUP_FAILED);
 
+    /* Set the path MTU on the endpoint, before there is an association.
+     *
+     * There is a second SCTP_PEER_ADDR_PARAMS call further down, after
+     * usrsctp_connect. That one cannot work: an AF_CONN destination starts at
+     * an MTU of 1280, the association's smallest_mtu is initialized from it,
+     * and the post-connect path only ever lowers smallest_mtu
+     * (sctp_usrreq.c, "if (net->mtu < stcb->asoc.smallest_mtu)"). Raising it
+     * to SCTP_MTU there is silently a no-op.
+     *
+     * With no association the same option lands on inp->sctp_ep.default_mtu,
+     * which sctp_init_asoc copies into asoc->default_mtu, which is what the
+     * association's MTU is built from. Fragmentation then happens at
+     * SCTP_MTU - 28 rather than 1280 - 28, so every full packet carries 80
+     * more bytes -- worth about 6% of the wire on a link where the packet
+     * rate, not the byte rate, is what saturates. */
+    {
+        struct sctp_paddrparams mtuParams;
+        MEMSET(&mtuParams, 0x00, SIZEOF(mtuParams));
+        mtuParams.spp_assoc_id = SCTP_FUTURE_ASSOC;
+        mtuParams.spp_flags = SPP_PMTUD_DISABLE;
+        mtuParams.spp_pathmtu = SCTP_MTU;
+        CHK(usrsctp_setsockopt(socket, IPPROTO_SCTP, SCTP_PEER_ADDR_PARAMS, &mtuParams, SIZEOF(mtuParams)) == 0,
+            STATUS_SCTP_SESSION_SETUP_FAILED);
+    }
+
     /* usrsctp defaults this to SB_MAX, 256 KB, which is a desktop number. At
      * the rate this link carries that is most of a second of data buffered
      * ahead of the wire, and for live video buffered means stale.
@@ -361,11 +386,14 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
                 socklen_t stlen = SIZEOF(st);
                 MEMSET(&st, 0, SIZEOF(st));
                 if (usrsctp_getsockopt(pSctpSession->socket, IPPROTO_SCTP, SCTP_STATUS, &st, &stlen) == 0) {
-                    ESP_LOGW("sctp", "assoc: state %d, rwnd %u, unacked %u chunks, pending %u, cwnd %u, srtt %u ms",
+                    /* spinfo_mtu is the proof that the MTU option applied.
+                     * 1280 means it did not and messages fragment at 1252. */
+                    ESP_LOGW("sctp", "assoc: state %d, rwnd %u, unacked %u chunks, pending %u, cwnd %u, srtt %u ms, mtu %u",
                              (int) st.sstat_state, (unsigned) st.sstat_rwnd,
                              (unsigned) st.sstat_unackdata, (unsigned) st.sstat_penddata,
                              (unsigned) st.sstat_primary.spinfo_cwnd,
-                             (unsigned) st.sstat_primary.spinfo_srtt);
+                             (unsigned) st.sstat_primary.spinfo_srtt,
+                             (unsigned) st.sstat_primary.spinfo_mtu);
                 } else {
                     ESP_LOGW("sctp", "assoc status unavailable (errno %d)", errno);
                 }
