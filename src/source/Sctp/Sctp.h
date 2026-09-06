@@ -26,6 +26,11 @@ extern "C" {
 /* Must stay under what one DTLS record can carry, because an SCTP packet
  * has to travel as a single datagram.
  *
+ * With the DTLS MTU at 1440, a GCM record spends 13 bytes on the header, 8 on
+ * the explicit nonce and 16 on the tag, leaving about 1403. 1360 keeps margin
+ * for that arithmetic being slightly off, which matters because getting it
+ * wrong fails silently -- see below.
+ *
  * Dtls_mbedtls.c sets the DTLS MTU to DEFAULT_MTU_SIZE_BYTES (1200) and
  * then, in dtlsSessionPutApplicationData, splits anything larger than
  * mbedtls_ssl_get_max_out_record_payload() across several records. For
@@ -37,7 +42,7 @@ extern "C" {
  * Small messages fit in one packet and survived, so this only appeared
  * once a message was large enough for usrsctp to fragment. 1100 leaves
  * room for ciphersuites with more overhead than GCM. */
-#define SCTP_MTU                         1100
+#define SCTP_MTU                         1360
 #define SCTP_ASSOCIATION_DEFAULT_PORT    5000
 #define SCTP_DCEP_HEADER_LENGTH          12
 #define SCTP_DCEP_LABEL_LEN_OFFSET       8

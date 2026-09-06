@@ -3,6 +3,17 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
+/* The DTLS MTU, separate from DEFAULT_MTU_SIZE_BYTES because that one also
+ * sizes RTP packetization and means something different.
+ *
+ * 1200 was leaving a quarter of every Ethernet frame empty. On a 1500-byte
+ * path the UDP payload is 1472 over IPv4 and 1452 over IPv6; 1440 fits both
+ * with room to spare, and IP fragmentation would cost more than the header
+ * bytes it saves. Per-packet cost is what this transport is limited by --
+ * about 1.5 ms of crypto and socket time per packet regardless of size -- so
+ * fewer, fuller packets is the lever. */
+#define DTLS_MTU_SIZE_BYTES 1440
+
 /**  https://tools.ietf.org/html/rfc5764#section-4.1.2 */
 mbedtls_ssl_srtp_profile DTLS_SRTP_SUPPORTED_PROFILES[] = {
     MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_80,
@@ -46,7 +57,8 @@ STATUS createDtlsSession(PDtlsSessionCallbacks pDtlsSessionCallbacks, TIMER_QUEU
     mbedtls_ctr_drbg_set_prediction_resistance(&pDtlsSession->ctrDrbg, MBEDTLS_CTR_DRBG_PR_OFF);
     CHK(mbedtls_ctr_drbg_seed(&pDtlsSession->ctrDrbg, mbedtls_entropy_func, &pDtlsSession->entropy, NULL, 0) == 0, STATUS_CREATE_SSL_FAILED);
 
-    CHK_STATUS(createIOBuffer(DEFAULT_MTU_SIZE_BYTES, &pDtlsSession->pReadBuffer));
+    /* Sized for what a peer may send us, not for what we send. */
+    CHK_STATUS(createIOBuffer(MAX(DTLS_MTU_SIZE_BYTES, 1500), &pDtlsSession->pReadBuffer));
     pDtlsSession->timerQueueHandle = timerQueueHandle;
     pDtlsSession->timerId = MAX_UINT32;
     pDtlsSession->sslLock = MUTEX_CREATE(TRUE);
@@ -375,7 +387,7 @@ STATUS dtlsSessionStart(PDtlsSession pDtlsSession, BOOL isServer)
 #endif
 
     CHK(mbedtls_ssl_setup(&pDtlsSession->sslCtx, &pDtlsSession->sslCtxConfig) == 0, STATUS_SSL_CTX_CREATION_FAILED);
-    mbedtls_ssl_set_mtu(&pDtlsSession->sslCtx, DEFAULT_MTU_SIZE_BYTES);
+    mbedtls_ssl_set_mtu(&pDtlsSession->sslCtx, DTLS_MTU_SIZE_BYTES);
     mbedtls_ssl_set_bio(&pDtlsSession->sslCtx, pDtlsSession, (mbedtls_ssl_send_t*)(void*)dtlsSessionSendCallback, (mbedtls_ssl_recv_t*)(void*)dtlsSessionReceiveCallback, NULL);
 
 #if !MBEDTLS_BEFORE_V3
