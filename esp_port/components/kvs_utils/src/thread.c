@@ -288,6 +288,31 @@ STATUS defaultCreateThreadPriWithCaps(PTID pThreadId, PCHAR threadName, UINT32 t
     DLOGD("pthread_create finished, result: %d", (int) result);
 
 #if defined(KVS_PLAT_ESP_FREERTOS)
+    /* Internal RAM is the scarce pool and it fragments. connListener asks for
+     * 32 KB and has been refused with 67 KB free but a largest block of 31744,
+     * which fails the whole connection -- the offer never goes out and the
+     * browser reaches nothing.
+     *
+     * A slower thread beats no connection, so fall back to PSRAM rather than
+     * give up. Internal is still tried first, so nothing moves off it while
+     * there is room; this only changes what happens where the alternative was
+     * failure. */
+    if (result != 0 && (caps & MALLOC_CAP_INTERNAL) != 0) {
+        pthread_cfg.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+        if (esp_pthread_set_cfg(&pthread_cfg) == ESP_OK) {
+            result = pthread_create(&threadId, pAttr, start, args);
+            if (result == 0) {
+                ESP_LOGW("kvs_thread", "%s took its %u byte stack from PSRAM; internal was too fragmented "
+                                       "(largest block %u)",
+                         threadName != NULL ? threadName : "unnamed",
+                         (unsigned) (threadSize == 0 ? DEFAULT_THREAD_SIZE : threadSize),
+                         (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+            }
+        }
+    }
+#endif
+
+#if defined(KVS_PLAT_ESP_FREERTOS)
     UINT32 curTotalSize = esp_get_free_heap_size();
     UINT32 curSpiSize = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     UINT32 curInternalSize = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
@@ -371,6 +396,17 @@ PUBLIC_API STATUS defaultCreateThread(PTID pThreadId, startRoutine start, PVOID 
 PUBLIC_API STATUS defaultCreateThreadExPri(PTID pThreadId, PCHAR threadName, UINT32 threadSize, BOOL joinable, startRoutine start, INT32 prio, PVOID args)
 {
     return defaultCreateThreadPri(pThreadId, threadName, threadSize, joinable, start, prio, args);
+}
+
+/* Same, with the stack taken from PSRAM. Internal RAM is the scarce pool and
+ * it fragments; a 32 KB stack is the largest single thing asked of it, and
+ * failing to get one fails a whole connection. Whether a thread can afford to
+ * live out there depends on what runs on its stack, so this is opt-in per call
+ * site rather than a global default. */
+PUBLIC_API STATUS defaultCreateThreadExPriPsram(PTID pThreadId, PCHAR threadName, UINT32 threadSize, BOOL joinable, startRoutine start, INT32 prio,
+                                                PVOID args)
+{
+    return defaultCreateThreadPriExt(pThreadId, threadName, threadSize, joinable, start, prio, args);
 }
 
 PUBLIC_API STATUS defaultJoinThread(TID threadId, PVOID* retVal)
@@ -515,6 +551,7 @@ createThread globalCreateThread = defaultCreateThread;
 createThreadEx globalCreateThreadEx = defaultCreateThreadEx;
 createThreadExExt globalCreateThreadExExt = defaultCreateThreadExExt;
 createThreadExPri globalCreateThreadExPri = defaultCreateThreadExPri;
+createThreadExPri globalCreateThreadExPriPsram = defaultCreateThreadExPriPsram;
 threadSleep globalThreadSleep = defaultThreadSleep;
 threadSleepUntil globalThreadSleepUntil = defaultThreadSleepUntil;
 joinThread globalJoinThread = defaultJoinThread;

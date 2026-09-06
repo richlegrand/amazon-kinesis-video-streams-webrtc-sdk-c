@@ -35,6 +35,7 @@ extern getTName globalGetThreadName;
 //
 extern createThreadExExt globalCreateThreadExExt;
 extern createThreadExPri globalCreateThreadExPri;
+extern createThreadExPri globalCreateThreadExPriPsram;
 extern exitThread globalExitThread;
 
 //
@@ -50,6 +51,7 @@ extern exitThread globalExitThread;
 #define THREAD_CREATE_EX     globalCreateThreadEx
 #define THREAD_CREATE_EX_EXT globalCreateThreadExExt
 #define THREAD_CREATE_EX_PRI globalCreateThreadExPri
+#define THREAD_CREATE_EX_PRI_PSRAM globalCreateThreadExPriPsram
 #define THREAD_JOIN          globalJoinThread
 #define THREAD_SLEEP         globalThreadSleep
 #define THREAD_SLEEP_UNTIL   globalThreadSleepUntil

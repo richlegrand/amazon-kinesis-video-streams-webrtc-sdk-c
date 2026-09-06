@@ -3,6 +3,8 @@
  */
 #define LOG_CLASS "ConnectionListener"
 #include "../Include_i.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
 
 STATUS createConnectionListener(PConnectionListener* ppConnectionListener)
 {
@@ -233,9 +235,53 @@ STATUS connectionListenerStart(PConnectionListener pConnectionListener)
  * starve the stack feeding it. It blocks in poll() and only runs when there is
  * something to read, so a high priority costs nothing when idle. */
 #define CONN_LISTENER_THREAD_PRIORITY 10
-    CHK_STATUS(THREAD_CREATE_EX_PRI(&pConnectionListener->receiveDataRoutine, "connListener",
-               CONN_LISTENER_THREAD_STACK_SIZE, TRUE, connectionListenerReceiveDataRoutine,
-               CONN_LISTENER_THREAD_PRIORITY, (PVOID) pConnectionListener));
+
+/* Where this thread's 32 KB stack comes from.
+ *
+ * Internal RAM is the scarce pool on this chip and it fragments. This stack is
+ * the largest single allocation any connection asks for, and when it cannot be
+ * satisfied the offer never goes out -- observed with 67 KB free and a largest
+ * block of 31744, which is 1024 bytes short. A second session existing briefly
+ * during a browser refresh is enough to cause it.
+ *
+ * Moving it was not obviously free -- inbound DTLS decrypt runs on this stack
+ * and DTLS costs about 1.8 ms per packet -- so it was measured rather than
+ * argued. Same link, same MTU, same scene:
+ *
+ *   PSRAM     internal free 105351 -> 104995, largest block 32768, ~258 KB/s
+ *   internal  internal free 105367 ->  72239, largest block 31744,  265 KB/s
+ *
+ * 2.7% apart, against a window-to-window spread of 5% within either run, and
+ * connectivity checks answered at identical latency in both. The memory
+ * difference is not marginal in the same way: on internal RAM one session
+ * alone leaves the largest block at 31744, which is precisely what the next
+ * 32768 byte request failed on.
+ *
+ * Set to 0 to measure the internal-RAM side again. Either way the allocation
+ * is not fatal: globalCreateThreadPriWithCaps falls back to PSRAM when
+ * internal is refused. This flag decides where it starts. */
+#define CONN_LISTENER_STACK_IN_PSRAM 1
+
+#if CONN_LISTENER_STACK_IN_PSRAM
+#define CONN_LISTENER_THREAD_CREATE THREAD_CREATE_EX_PRI_PSRAM
+#else
+#define CONN_LISTENER_THREAD_CREATE THREAD_CREATE_EX_PRI
+#endif
+    {
+        /* Say where the stack came from, so a run can be attributed without
+         * trusting which binary was flashed. Internal drops by the stack size
+         * when it comes from there and barely moves when it does not. */
+        SIZE_T beforeInternal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        CHK_STATUS(CONN_LISTENER_THREAD_CREATE(&pConnectionListener->receiveDataRoutine, "connListener",
+                   CONN_LISTENER_THREAD_STACK_SIZE, TRUE, connectionListenerReceiveDataRoutine,
+                   CONN_LISTENER_THREAD_PRIORITY, (PVOID) pConnectionListener));
+        ESP_LOGW("ice", "connListener stack: %s, %u KB; internal free %u -> %u, largest block %u",
+                 CONN_LISTENER_STACK_IN_PSRAM ? "PSRAM" : "internal",
+                 (unsigned) (CONN_LISTENER_THREAD_STACK_SIZE / 1024),
+                 (unsigned) beforeInternal,
+                 (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    }
 #else
     CHK_STATUS(THREAD_CREATE(&pConnectionListener->receiveDataRoutine, connectionListenerReceiveDataRoutine, (PVOID) pConnectionListener));
 #endif
