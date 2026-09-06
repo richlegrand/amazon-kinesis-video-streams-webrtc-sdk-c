@@ -280,15 +280,15 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
 
     putInt32((PINT32) &spa.sendv_sndinfo.snd_ppid, isBinary ? SCTP_PPID_BINARY : SCTP_PPID_STRING);
 
-    /* Report each stream's delivery settings the first time it is written, so
-     * two channels opened with different reliability can be seen actually
-     * sending differently. Cheap: a bitmask over the low stream ids, printed
-     * once each. */
+    /* Report each channel's delivery settings the first time it is written,
+     * so two channels opened with different reliability can be seen actually
+     * sending differently. One line per data channel, not per application
+     * stream multiplexed inside it. Cheap: a bitmask over the low ids. */
     {
         static UINT32 loggedStreams;
         if (streamId < 32 && (loggedStreams & (1u << streamId)) == 0) {
             loggedStreams |= (1u << streamId);
-            ESP_LOGW("sctp", "stream %u: %s%s", (unsigned) streamId,
+            ESP_LOGW("sctp", "channel on sctp stream %u: %s%s", (unsigned) streamId,
                      (spa.sendv_sndinfo.snd_flags & SCTP_UNORDERED) ? "unordered" : "ordered",
                      (spa.sendv_flags & SCTP_SEND_PRINFO_VALID)
                          ? ((spa.sendv_prinfo.pr_policy == SCTP_PR_SCTP_TTL) ? ", lifetime-limited" : ", retransmit-limited")
