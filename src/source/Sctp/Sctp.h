@@ -38,7 +38,7 @@
  * must exceed the bandwidth-delay product or it caps throughput rather than
  * latency -- roughly 33 KB on a 200 ms path at these rates, so this is at the
  * edge for a remote peer and should be watched there. */
-#define SCTP_SESSION_SNDBUF_BYTES    (48 * 1024)
+#define SCTP_SESSION_SNDBUF_BYTES    (256 * 1024)
 #define SCTP_TIMER_THREAD_STACK_SIZE (8 * 1024)
 
 #define SCTP_SEND_BUFFER_RETRY_MS    2
