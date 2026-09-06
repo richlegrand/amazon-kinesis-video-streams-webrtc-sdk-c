@@ -11,10 +11,6 @@
 /* How often usrsctp_handle_timers is driven. usrsctp's own timer thread
  * uses 10ms; anything much coarser delays retransmission. */
 #define SCTP_TIMER_INTERVAL_MS       10
-
-/* Packets one SCTP output cycle may emit before yielding. See the note where
- * this is applied; the aim is to break up the train a large message produces. */
-#define SCTP_SESSION_MAX_BURST       1
 #define SCTP_TIMER_THREAD_STACK_SIZE (8 * 1024)
 
 #define SCTP_SEND_BUFFER_RETRY_MS    2
