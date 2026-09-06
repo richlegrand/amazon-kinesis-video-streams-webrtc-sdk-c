@@ -30,7 +30,20 @@ STATUS createDtlsSession(PDtlsSessionCallbacks pDtlsSessionCallbacks, TIMER_QUEU
     mbedtls_ctr_drbg_init(&pDtlsSession->ctrDrbg);
     mbedtls_ssl_config_init(&pDtlsSession->sslCtxConfig);
     mbedtls_ssl_init(&pDtlsSession->sslCtx);
-    mbedtls_ctr_drbg_set_prediction_resistance(&pDtlsSession->ctrDrbg, MBEDTLS_CTR_DRBG_PR_ON);
+    /* Not PR_ON. Prediction resistance forces a full reseed on every single
+     * call to mbedtls_ctr_drbg_random -- gather entropy from the hardware
+     * source, hash the pool, run the DRBG update -- and DTLS draws from this
+     * generator once per record. Measured on an ESP32-S3, that was about
+     * 2.4 ms per packet, independent of record size: a 50-byte heartbeat cost
+     * the same as a full 1100-byte data record, which is what gave it away.
+     *
+     * PR_OFF is the default and what TLS stacks normally run. The generator is
+     * still seeded from mbedtls_entropy_func below, and still reseeds itself
+     * every MBEDTLS_CTR_DRBG_RESEED_INTERVAL (10000) calls. Prediction
+     * resistance defends against an attacker who has already read the DRBG
+     * state between two calls; on this path it was costing more than the
+     * transport it protects. */
+    mbedtls_ctr_drbg_set_prediction_resistance(&pDtlsSession->ctrDrbg, MBEDTLS_CTR_DRBG_PR_OFF);
     CHK(mbedtls_ctr_drbg_seed(&pDtlsSession->ctrDrbg, mbedtls_entropy_func, &pDtlsSession->entropy, NULL, 0) == 0, STATUS_CREATE_SSL_FAILED);
 
     CHK_STATUS(createIOBuffer(DEFAULT_MTU_SIZE_BYTES, &pDtlsSession->pReadBuffer));
