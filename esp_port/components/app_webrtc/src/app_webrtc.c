@@ -2769,6 +2769,15 @@ WEBRTC_STATUS app_webrtc_declare_data_channel(const char *label,
     return WEBRTC_STATUS_SUCCESS;
 }
 
+WEBRTC_STATUS app_webrtc_set_send_buffer(void *pDataChannel, int bytes)
+{
+    if (gWebRtcAppConfig.peer_connection_if == NULL ||
+        gWebRtcAppConfig.peer_connection_if->set_send_buffer == NULL) {
+        return WEBRTC_STATUS_NOT_IMPLEMENTED;
+    }
+    return gWebRtcAppConfig.peer_connection_if->set_send_buffer(pDataChannel, bytes);
+}
+
 const char *app_webrtc_data_channel_label(void *pDataChannel)
 {
     if (gWebRtcAppConfig.peer_connection_if == NULL ||

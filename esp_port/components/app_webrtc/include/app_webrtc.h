@@ -315,6 +315,15 @@ WEBRTC_STATUS app_webrtc_declare_data_channel(const char *label,
 const char *app_webrtc_data_channel_label(void *pDataChannel);
 
 /**
+ * @brief Resize the association's send buffer at runtime.
+ *
+ * This is what throttles a producer: it blocks when it cannot get a contiguous
+ * gap here. The right size depends on how big the messages are and on the
+ * link, so it is worth being able to change without a rebuild.
+ */
+WEBRTC_STATUS app_webrtc_set_send_buffer(void *pDataChannel, int bytes);
+
+/**
  * @brief Create a data channel on the active peer session for @p peer_id.
  *
  * The channel's onOpen callback (from app_webrtc_config_t.data_channel_config

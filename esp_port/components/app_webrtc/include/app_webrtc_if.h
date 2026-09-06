@@ -360,6 +360,10 @@ typedef struct {
      * needs the label to know what it just got. */
     const char *(*get_data_channel_label)(void *pDataChannel);
 
+    /* Resize the association's send buffer. It is the throttle, and its right
+     * value depends on message size and on the link. */
+    WEBRTC_STATUS (*set_send_buffer)(void *pDataChannel, int bytes);
+
     WEBRTC_STATUS (*create_data_channel)(void *pSession,
                                         const char *channelName,
                                         const app_webrtc_data_channel_init_t *pInit,

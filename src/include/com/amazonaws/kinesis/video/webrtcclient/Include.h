@@ -2072,6 +2072,7 @@ PUBLIC_API STATUS dataChannelOnOpen(PRtcDataChannel, UINT64, RtcOnOpen);
  *
  */
 PUBLIC_API STATUS dataChannelSend(PRtcDataChannel, BOOL, PBYTE, UINT32);
+PUBLIC_API STATUS dataChannelSetSendBuffer(PRtcDataChannel, INT32);
 
 /**
  * @brief Use the process described in https://tools.ietf.org/html/rfc5780#section-4.3 to

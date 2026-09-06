@@ -1472,6 +1472,15 @@ CleanUp:
  * @param ppDataChannel Pointer to store the created data channel
  * @return WEBRTC_STATUS
  */
+static WEBRTC_STATUS kvs_pc_set_send_buffer(void *pDataChannel, int bytes)
+{
+    if (pDataChannel == NULL) {
+        return WEBRTC_STATUS_NULL_ARG;
+    }
+    return (dataChannelSetSendBuffer((PRtcDataChannel) pDataChannel, (INT32) bytes) == STATUS_SUCCESS)
+               ? WEBRTC_STATUS_SUCCESS : WEBRTC_STATUS_INVALID_OPERATION;
+}
+
 static const char *kvs_pc_get_data_channel_label(void *pDataChannel)
 {
     return (pDataChannel != NULL) ? ((PRtcDataChannel) pDataChannel)->name : NULL;
@@ -1671,6 +1680,7 @@ webrtc_peer_connection_if_t* kvs_peer_connection_if_get(void)
         // Data channel functions
         .create_data_channel = kvs_pc_create_data_channel,
         .get_data_channel_label = kvs_pc_get_data_channel_label,
+        .set_send_buffer = kvs_pc_set_send_buffer,
         .set_data_channel_callbacks = kvs_pc_set_data_channel_callbacks,
         .send_data_channel_message = kvs_pc_send_data_channel_message,
     };

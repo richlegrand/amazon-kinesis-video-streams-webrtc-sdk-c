@@ -54,6 +54,17 @@ CleanUp:
     return retStatus;
 }
 
+STATUS dataChannelSetSendBuffer(PRtcDataChannel pRtcDataChannel, INT32 bytes)
+{
+    STATUS retStatus = STATUS_SUCCESS;
+    PKvsDataChannel pKvsDataChannel = (PKvsDataChannel) pRtcDataChannel;
+    CHK(pKvsDataChannel != NULL, STATUS_NULL_ARG);
+    CHK_STATUS(sctpSessionSetSendBuffer(
+        ((PKvsPeerConnection) pKvsDataChannel->pRtcPeerConnection)->pSctpSession, bytes));
+CleanUp:
+    return retStatus;
+}
+
 STATUS dataChannelSend(PRtcDataChannel pRtcDataChannel, BOOL isBinary, PBYTE pMessage, UINT32 pMessageLen)
 {
     STATUS retStatus = STATUS_SUCCESS;

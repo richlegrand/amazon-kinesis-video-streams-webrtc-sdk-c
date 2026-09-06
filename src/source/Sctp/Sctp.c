@@ -258,6 +258,20 @@ CleanUp:
     return retStatus;
 }
 
+/* Resize the send buffer on a live association.
+ *
+ * This is the throttle, and its right value depends on message size and on the
+ * link -- so being able to sweep it in one run beats a rebuild per value. */
+STATUS sctpSessionSetSendBuffer(PSctpSession pSctpSession, INT32 bytes)
+{
+    STATUS retStatus = STATUS_SUCCESS;
+    CHK(pSctpSession != NULL && bytes > 0, STATUS_NULL_ARG);
+    CHK(usrsctp_setsockopt(pSctpSession->socket, SOL_SOCKET, SO_SNDBUF, &bytes, SIZEOF(bytes)) == 0,
+        STATUS_INTERNAL_ERROR);
+CleanUp:
+    return retStatus;
+}
+
 STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL isBinary, PBYTE pMessage, UINT32 pMessageLen,
                                PRtcDataChannelInit pRtcDataChannelInit)
 {
