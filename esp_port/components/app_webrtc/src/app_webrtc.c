@@ -1526,6 +1526,18 @@ CleanUp:
 typedef struct {
     char label[32];
     app_webrtc_data_channel_init_t init;
+    /* The init holds `protocol` as a pointer, and declarations outlive the
+     * call that made them, so the string is copied here and the stored init
+     * repointed at the copy. Otherwise a caller passing a stack buffer would
+     * leave a dangling pointer that only shows up at the first connection.
+     *
+     * 64 rather than the SDK's MAX_DATA_CHANNEL_PROTOCOL_LEN + 1 (256), which
+     * is what the wire allows. Matching it would cost 768 bytes of static RAM
+     * across the four declaration slots to hold names nobody writes --
+     * "bitbang-stream/mjpeg" is 20 characters. A longer name is truncated here
+     * and again at the kvs layer; if that ever matters, this is the limit to
+     * raise first. */
+    char protocol[64];
     bool init_set;
 } app_declared_channel_t;
 static app_declared_channel_t gDeclaredChannels[APP_WEBRTC_MAX_DECLARED_CHANNELS];
@@ -2773,13 +2785,19 @@ WEBRTC_STATUS app_webrtc_declare_data_channel(const char *label,
     strlcpy(decl->label, label, sizeof(decl->label));
     if (pInit != NULL) {
         decl->init = *pInit;
+        decl->protocol[0] = '\0';
+        if (pInit->protocol != NULL) {
+            strlcpy(decl->protocol, pInit->protocol, sizeof(decl->protocol));
+        }
+        decl->init.protocol = decl->protocol;
         decl->init_set = true;
     }
-    ESP_LOGI(TAG, "declared data channel '%s': %s%s", decl->label,
+    ESP_LOGI(TAG, "declared data channel '%s': %s%s%s%s", decl->label,
              (pInit == NULL || pInit->ordered) ? "ordered" : "unordered",
              (pInit != NULL && pInit->max_retransmits)          ? ", retransmit-limited"
              : (pInit != NULL && pInit->max_packet_lifetime_ms) ? ", lifetime-limited"
-                                                                : ", reliable");
+                                                                : ", reliable",
+             decl->protocol[0] ? ", protocol " : "", decl->protocol);
     return WEBRTC_STATUS_SUCCESS;
 }
 

@@ -558,7 +558,16 @@ STATUS sctpSessionWriteDcep(PSctpSession pSctpSession, UINT32 streamId, PCHAR pC
 
     MEMSET(&spa, 0x00, SIZEOF(spa));
     MEMSET(pSctpSession->packet, 0x00, SIZEOF(pSctpSession->packet));
-    pSctpSession->packetSize = SCTP_DCEP_HEADER_LENGTH + pChannelNameLen;
+
+    /* The sub-protocol names what the channel carries, which the receiver
+     * needs before the first message rather than after -- a decoder has to be
+     * chosen, and sniffing the payload cannot do it. The packet buffer was
+     * always sized for it; only the writer was missing. */
+    UINT32 protocolLen = 0;
+    if (pRtcDataChannelInit != NULL) {
+        protocolLen = (UINT32) STRNLEN(pRtcDataChannelInit->protocol, MAX_DATA_CHANNEL_PROTOCOL_LEN);
+    }
+    pSctpSession->packetSize = SCTP_DCEP_HEADER_LENGTH + pChannelNameLen + protocolLen;
     /* Setting the fields of DATA_CHANNEL_OPEN message */
 
     pSctpSession->packet[0] = DCEP_DATA_CHANNEL_OPEN; // message type
@@ -587,7 +596,11 @@ STATUS sctpSessionWriteDcep(PSctpSession pSctpSession, UINT32 streamId, PCHAR pC
     }
 
     putUnalignedInt16BigEndian(pSctpSession->packet + SCTP_DCEP_LABEL_LEN_OFFSET, pChannelNameLen);
+    putUnalignedInt16BigEndian(pSctpSession->packet + SCTP_DCEP_PROTOCOL_LEN_OFFSET, protocolLen);
     MEMCPY(pSctpSession->packet + SCTP_DCEP_LABEL_OFFSET, pChannelName, pChannelNameLen);
+    if (protocolLen > 0) {
+        MEMCPY(pSctpSession->packet + SCTP_DCEP_LABEL_OFFSET + pChannelNameLen, pRtcDataChannelInit->protocol, protocolLen);
+    }
     spa.sendv_flags |= SCTP_SEND_SNDINFO_VALID;
     spa.sendv_sndinfo.snd_sid = streamId;
 

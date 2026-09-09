@@ -1514,6 +1514,14 @@ static WEBRTC_STATUS kvs_pc_create_data_channel(void *pSession, const char *chan
         } else if (pInit->max_packet_lifetime_ms != 0) {
             NULLABLE_SET_VALUE(dcInit.maxPacketLifeTime, pInit->max_packet_lifetime_ms);
         }
+        /* Reaches the peer in the DCEP OPEN and surfaces as
+         * RTCDataChannel.protocol. Truncation is silent by design: a
+         * sub-protocol long enough to overrun this is a caller error, and
+         * refusing the channel over it would be worse than a short name. */
+        if (pInit->protocol != NULL && pInit->protocol[0] != '\0') {
+            STRNCPY(dcInit.protocol, pInit->protocol, MAX_DATA_CHANNEL_PROTOCOL_LEN);
+            dcInit.protocol[MAX_DATA_CHANNEL_PROTOCOL_LEN] = '\0';
+        }
     }
 
     CHK_STATUS(createDataChannel(session->peer_connection, (PCHAR)channelName,

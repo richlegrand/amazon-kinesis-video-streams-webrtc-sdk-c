@@ -106,6 +106,11 @@ extern "C" {
 #define SCTP_ASSOCIATION_DEFAULT_PORT    5000
 #define SCTP_DCEP_HEADER_LENGTH          12
 #define SCTP_DCEP_LABEL_LEN_OFFSET       8
+/* RFC 8832: label length at 8, protocol length at 10, then the label followed
+ * by the protocol. The writer set the label and left this zero, which is a
+ * valid "no protocol" rather than a malformed message -- so ch.protocol was
+ * always empty in the browser and nothing noticed. */
+#define SCTP_DCEP_PROTOCOL_LEN_OFFSET    10
 #define SCTP_DCEP_LABEL_OFFSET           12
 #define SCTP_MAX_ALLOWABLE_PACKET_LENGTH (SCTP_DCEP_HEADER_LENGTH + MAX_DATA_CHANNEL_NAME_LEN + MAX_DATA_CHANNEL_PROTOCOL_LEN + 2)
 

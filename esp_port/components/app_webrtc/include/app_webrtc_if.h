@@ -286,6 +286,13 @@ typedef struct {
      * the window is abandoned rather than delivered late. */
     uint16_t max_packet_lifetime_ms;
     uint16_t max_retransmits;
+    /* Sub-protocol, reaching the peer in the DCEP OPEN and surfacing as
+     * RTCDataChannel.protocol in a browser. It says what the channel carries
+     * so the receiver can choose a handler before the first message: a decoder
+     * cannot be picked by sniffing, and the label is the wrong place because
+     * it names the stream, not its type. Empty means none, which is what every
+     * channel sent before this existed. */
+    const char *protocol;
 } app_webrtc_data_channel_init_t;
 
 /**
