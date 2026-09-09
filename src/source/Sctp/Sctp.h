@@ -42,6 +42,24 @@
  * must exceed the bandwidth-delay product or it caps throughput rather than
  * latency -- roughly 33 KB on a 200 ms path at these rates, so this is at the
  * edge for a remote peer and should be watched there. */
+/* This is a latency knob on a fast path and a throughput floor on a slow one,
+ * and the two want different values.
+ *
+ * Swept flat out on a LAN, throughput was flat from 32 KB to 192 KB while cwnd
+ * tracked the buffer all the way to 123,660 -- so above the bandwidth-delay
+ * product, which is about 4 KB at 15 ms, every extra byte is standing queue.
+ * 32 KB is roughly 120 ms of queued video against 48 KB's 180 ms, and measured
+ * on the camera it cost no throughput at all.
+ *
+ * On a relayed cellular path the same buffer is the ceiling instead: srtt is
+ * about 170 ms, cwnd sat at 45,000 to 49,859 pressed against 48 KB, and 42 KB
+ * in flight is what 247 KB/s required. 32 KB there predicts about 188 KB/s,
+ * roughly 16 fps down to 12.
+ *
+ * 48 KB stays because its cost is latency on the fast path while 32 KB's cost
+ * is throughput on the slow one, and the slow path has no margin. Sizing this
+ * from the measured srtt is the real answer and wants doing alongside path-MTU
+ * discovery. */
 #define SCTP_SESSION_SNDBUF_BYTES    (48 * 1024)
 #define SCTP_TIMER_THREAD_STACK_SIZE (8 * 1024)
 
