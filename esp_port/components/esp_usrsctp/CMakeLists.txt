@@ -73,6 +73,13 @@ set(MBEDTLS_LIBRARIES mbedtls mbedcrypto mbedx509)
 # Add the directory with our custom FindMbedTLS.cmake to CMAKE_MODULE_PATH
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_BINARY_DIR}")
 
+# usrsctp is added with add_subdirectory, so it builds as a plain CMake target
+# and does not inherit this component's REQUIRES include paths. sctp_userspace.c
+# includes esp_pthread.h to put usrsctp's own thread stacks in SPIRAM, so that
+# one path has to be handed over explicitly -- same approach as the mbedTLS
+# shim above.
+include_directories("${IDF_PATH}/components/pthread/include")
+
 # Add compiler flags to suppress warnings
 add_compile_options(
     -Wno-address-of-packed-member

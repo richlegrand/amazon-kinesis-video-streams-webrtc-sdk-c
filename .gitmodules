@@ -6,7 +6,8 @@
 	url = https://github.com/awslabs/amazon-kinesis-video-streams-producer-c.git
 [submodule "esp_port/components/esp_usrsctp/usrsctp"]
         path = esp_port/components/esp_usrsctp/usrsctp
-	url = https://github.com/vikramdattu/usrsctp.git
+	url = https://github.com/richlegrand/usrsctp.git
+	branch = bitbang
 [submodule "esp_port/components/libsrtp2/libsrtp"]
 	path = esp_port/components/libsrtp2/libsrtp
 	url = https://github.com/cisco/libsrtp.git
