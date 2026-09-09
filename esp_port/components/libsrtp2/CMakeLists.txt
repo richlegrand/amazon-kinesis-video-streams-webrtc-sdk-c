@@ -66,4 +66,9 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
 
 target_compile_definitions(${COMPONENT_LIB} PUBLIC
     -DHAVE_CONFIG_H
+    # The ESP32 AES peripheral has no 192-bit key support, and mbedTLS rejects
+    # one. libsrtp's crypto kernel aborts init on the first cipher it cannot
+    # register, so without this SRTP never starts (STATUS_SRTP_INIT_FAILED).
+    # Nothing selects ICM-192 here -- the negotiated profiles are AES-128.
+    -DSRTP_NO_AES_ICM_192
 )

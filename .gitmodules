@@ -10,7 +10,8 @@
 	branch = bitbang
 [submodule "esp_port/components/libsrtp2/libsrtp"]
 	path = esp_port/components/libsrtp2/libsrtp
-	url = https://github.com/cisco/libsrtp.git
+	url = https://github.com/richlegrand/libsrtp.git
+	branch = bitbang
 [submodule "esp_port/components/libwebsockets/libwebsockets"]
 	path = esp_port/components/libwebsockets/libwebsockets
 	url = https://github.com/warmcat/libwebsockets.git
