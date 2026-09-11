@@ -1,5 +1,9 @@
 #define LOG_CLASS "SCTP"
 #include "kvs_instrumentation.h"
+#if KVS_INSTR
+/* esp_timer_get_time, used only by the instrumented timing below. */
+#include "esp_timer.h"
+#endif
 #include "../Include_i.h"
 #include "esp_log.h"
 

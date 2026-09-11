@@ -6,6 +6,10 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "kvs_instrumentation.h"
+#if KVS_INSTR
+/* esp_timer_get_time, used only by the instrumented timing below. */
+#include "esp_timer.h"
+#endif
 
 STATUS createConnectionListener(PConnectionListener* ppConnectionListener)
 {
