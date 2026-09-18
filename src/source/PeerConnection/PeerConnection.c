@@ -1,6 +1,7 @@
 #define LOG_CLASS "PeerConnection"
 
 #include "../Include_i.h"
+#include "kvs_teardown_watch.h"
 
 static volatile ATOMIC_BOOL gKvsWebRtcInitialized = (SIZE_T) FALSE;
 
@@ -1120,20 +1121,24 @@ STATUS freePeerConnection(PRtcPeerConnection* ppPeerConnection)
     startTime = GETTIME();
     /* Shutdown IceAgent first so there is no more incoming packets which can cause
      * SCTP to be allocated again after SCTP is freed. */
+    kvs_teardown_watch_stage("free: iceAgentShutdown");
     CHK_LOG_ERR(iceAgentShutdown(pKvsPeerConnection->pIceAgent));
 
     // free timer queue first to remove liveness provided by timer
     if (IS_VALID_TIMER_QUEUE_HANDLE(pKvsPeerConnection->timerQueueHandle)) {
+        kvs_teardown_watch_stage("free: timerQueueShutdown");
         timerQueueShutdown(pKvsPeerConnection->timerQueueHandle);
     }
 
     /* Free structs that have their own thread. SCTP has threads created by SCTP library. IceAgent has the
      * connectionListener thread. Free SCTP first so it wont try to send anything through ICE. */
 #ifdef ENABLE_DATA_CHANNEL
+    kvs_teardown_watch_stage("free: freeSctpSession");
     CHK_LOG_ERR(freeSctpSession(&pKvsPeerConnection->pSctpSession));
 #endif
 
     // free transceivers
+    kvs_teardown_watch_stage("free: transceivers");
     CHK_LOG_ERR(doubleListGetHeadNode(pKvsPeerConnection->pTransceivers, &pCurNode));
     while (pCurNode != NULL) {
         CHK_LOG_ERR(doubleListGetNodeData(pCurNode, &item));
@@ -1151,15 +1156,20 @@ STATUS freePeerConnection(PRtcPeerConnection* ppPeerConnection)
     }
 
     // Free DataChannels
+    kvs_teardown_watch_stage("free: data channels");
     CHK_LOG_ERR(hashTableIterateEntries(pKvsPeerConnection->pDataChannels, 0, freeHashEntry));
     CHK_LOG_ERR(hashTableFree(pKvsPeerConnection->pDataChannels));
 
     // free rest of structs
+    kvs_teardown_watch_stage("free: freeSrtpSession");
     CHK_LOG_ERR(freeSrtpSession(&pKvsPeerConnection->pSrtpSession));
+    kvs_teardown_watch_stage("free: freeDtlsSession");
     CHK_LOG_ERR(freeDtlsSession(&pKvsPeerConnection->pDtlsSession));
     // Since ICE agent has a callback invoked from DTLS during handshake,
     // it is safer to free the ICE agent after DTLS session
+    kvs_teardown_watch_stage("free: freeIceAgent");
     CHK_LOG_ERR(freeIceAgent(&pKvsPeerConnection->pIceAgent));
+    kvs_teardown_watch_stage("free: remaining structs");
     CHK_LOG_ERR(doubleListFree(pKvsPeerConnection->pTransceivers));
     CHK_LOG_ERR(doubleListFree(pKvsPeerConnection->pFakeTransceivers));
     CHK_LOG_ERR(doubleListFree(pKvsPeerConnection->pAnswerTransceivers));
@@ -1787,7 +1797,9 @@ STATUS closePeerConnection(PRtcPeerConnection pPeerConnection)
     PKvsPeerConnection pKvsPeerConnection = (PKvsPeerConnection) pPeerConnection;
     UINT64 startTime = GETTIME();
     CHK(pKvsPeerConnection != NULL, STATUS_NULL_ARG);
+    kvs_teardown_watch_stage("close: dtlsSessionShutdown");
     CHK_LOG_ERR(dtlsSessionShutdown(pKvsPeerConnection->pDtlsSession));
+    kvs_teardown_watch_stage("close: iceAgentShutdown");
     CHK_LOG_ERR(iceAgentShutdown(pKvsPeerConnection->pIceAgent));
     PROFILE_WITH_START_TIME_OBJ(startTime, pKvsPeerConnection->peerConnectionDiagnostics.closePeerConnectionTime, "Close peer connection");
 

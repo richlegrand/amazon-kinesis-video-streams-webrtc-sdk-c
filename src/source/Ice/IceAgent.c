@@ -5,6 +5,7 @@
 #include "kvs_instrumentation.h"
 #include "../Include_i.h"
 #include "esp_log.h"
+#include "kvs_teardown_watch.h"
 #include "esp_timer.h"
 
 // https://developer.mozilla.org/en-US/docs/Web/API/RTCIceCandidate/candidate
@@ -194,13 +195,17 @@ STATUS freeIceAgent(PIceAgent* ppIceAgent)
             pCurNode = pCurNode->pNext;
 
             if (pIceCandidate->iceCandidateType == ICE_CANDIDATE_TYPE_RELAYED) {
+                kvs_teardown_watch_stage("freeIce: freeTurnConnection");
                 CHK_LOG_ERR(freeTurnConnection(&pIceCandidate->pTurnConnection));
             }
         }
     }
 
     if (pIceAgent->pConnectionListener != NULL) {
+        /* Joins the connListener thread. */
+        kvs_teardown_watch_stage("freeIce: freeConnectionListener");
         CHK_LOG_ERR(freeConnectionListener(&pIceAgent->pConnectionListener));
+        kvs_teardown_watch_stage("freeIce: candidate pairs");
     }
 
     if (pIceAgent->iceCandidatePairs != NULL) {
@@ -960,23 +965,30 @@ STATUS iceAgentShutdown(PIceAgent pIceAgent)
     CHK(pIceAgent != NULL, STATUS_NULL_ARG);
     CHK(!ATOMIC_EXCHANGE_BOOL(&pIceAgent->shutdown, TRUE), retStatus);
 
+    /* Cancelling waits for a callback already in flight, and the state
+     * machine callback holds pIceAgent->lock while it runs. */
+    kvs_teardown_watch_stage("ice: cancel state timer");
     if (pIceAgent->iceAgentStateTimerTask != MAX_UINT32) {
         CHK_STATUS(timerQueueCancelTimer(pIceAgent->timerQueueHandle, pIceAgent->iceAgentStateTimerTask, (UINT64) pIceAgent));
         pIceAgent->iceAgentStateTimerTask = MAX_UINT32;
     }
 
+    kvs_teardown_watch_stage("ice: cancel keepalive timer");
     if (pIceAgent->keepAliveTimerTask != MAX_UINT32) {
         CHK_STATUS(timerQueueCancelTimer(pIceAgent->timerQueueHandle, pIceAgent->keepAliveTimerTask, (UINT64) pIceAgent));
         pIceAgent->keepAliveTimerTask = MAX_UINT32;
     }
 
+    kvs_teardown_watch_stage("ice: cancel gathering timer");
     if (pIceAgent->iceCandidateGatheringTimerTask != MAX_UINT32) {
         CHK_STATUS(timerQueueCancelTimer(pIceAgent->timerQueueHandle, pIceAgent->iceCandidateGatheringTimerTask, (UINT64) pIceAgent));
         pIceAgent->iceCandidateGatheringTimerTask = MAX_UINT32;
     }
 
+    kvs_teardown_watch_stage("ice: waiting for agent lock");
     MUTEX_LOCK(pIceAgent->lock);
     locked = TRUE;
+    kvs_teardown_watch_stage("ice: closing candidate sockets");
 
     CHK_STATUS(doubleListGetHeadNode(pIceAgent->localCandidates, &pCurNode));
     while (pCurNode != NULL) {
@@ -995,6 +1007,7 @@ STATUS iceAgentShutdown(PIceAgent pIceAgent)
     MUTEX_UNLOCK(pIceAgent->lock);
     locked = FALSE;
 
+    kvs_teardown_watch_stage("ice: draining turn connections");
     turnShutdownTimeout = GETTIME() + KVS_ICE_TURN_CONNECTION_SHUTDOWN_TIMEOUT;
     while (!turnShutdownCompleted && GETTIME() < turnShutdownTimeout) {
         for (i = 0, turnShutdownCompleted = TRUE; turnShutdownCompleted && i < turnConnectionCount; ++i) {
@@ -1011,6 +1024,7 @@ STATUS iceAgentShutdown(PIceAgent pIceAgent)
     }
 
     /* remove connections last because still need to send data to deallocate turn */
+    kvs_teardown_watch_stage("ice: removing connections");
     if (pIceAgent->pConnectionListener != NULL) {
         CHK_STATUS(connectionListenerRemoveAllConnection(pIceAgent->pConnectionListener));
     }

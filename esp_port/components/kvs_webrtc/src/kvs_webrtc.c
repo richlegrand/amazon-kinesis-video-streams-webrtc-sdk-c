@@ -21,6 +21,7 @@
  */
 
 #include "kvs_peer_connection.h"
+#include "kvs_teardown_watch.h"
 #include "app_webrtc_if.h"
 #include "kvs_webrtc_internal.h"
 #include "kvs_media.h"
@@ -701,6 +702,7 @@ static WEBRTC_STATUS kvs_pc_destroy_session(void *pSession)
     session = (kvs_pc_session_t *)pSession;
 
     ESP_LOGI(TAG, "Destroying KVS peer connection session for peer: %s", session->peer_id);
+    kvs_teardown_watch_begin(session->peer_id);
 
     // Manage global media threads and session cleanup (now handles all cleanup logic)
     if (session->client != NULL && IS_VALID_MUTEX_VALUE(session->client->session_count_mutex) &&
@@ -833,12 +835,14 @@ SkipCleanup:
                  session->peer_id, session->terminated ? "true" : "false");
 
         // Use non-failing versions for cleanup to avoid issues with already-failed connections
+        kvs_teardown_watch_stage("closePeerConnection");
         STATUS closeStatus = closePeerConnection(session->peer_connection);
         if (STATUS_FAILED(closeStatus)) {
             ESP_LOGW(TAG, "closePeerConnection failed for peer %s: 0x%08" PRIx32 " (continuing with freePeerConnection)",
                      session->peer_id, closeStatus);
         }
 
+        kvs_teardown_watch_stage("freePeerConnection");
         STATUS freeStatus = freePeerConnection(&session->peer_connection);
         if (STATUS_FAILED(freeStatus)) {
             ESP_LOGW(TAG, "freePeerConnection failed for peer %s: 0x%08" PRIx32, session->peer_id, (UINT32) freeStatus);
@@ -853,6 +857,7 @@ SkipCleanup:
     SAFE_MEMFREE(session);
 
 CleanUp:
+    kvs_teardown_watch_end();
     if (STATUS_FAILED(retStatus)) {
         ESP_LOGE(TAG, "Failed to destroy session: 0x%08" PRIx32, (UINT32) retStatus);
     }

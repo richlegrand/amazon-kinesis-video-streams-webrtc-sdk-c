@@ -90,6 +90,7 @@ endif()
 
 idf_component_register(
     SRCS "${CMAKE_CURRENT_SOURCE_DIR}/src/kvs_webrtc.c"
+         "${CMAKE_CURRENT_SOURCE_DIR}/src/kvs_teardown_watch.c"
          "${kvs_webrtc_srcs}"
 
     INCLUDE_DIRS "${kvs_webrtc_include_dirs}"
