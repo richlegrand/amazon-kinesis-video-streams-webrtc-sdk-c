@@ -789,6 +789,7 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
         // Get the signaling client state
         MUTEX_LOCK(pSampleConfiguration->sampleConfigurationObjLock);
         sampleConfigurationObjLockLocked = TRUE;
+        pAppWebRTCSession = NULL;
 
         /* Reclaim sessions whose offer was never answered. They are not
          * failed and not disconnected -- they never connected at all -- so
@@ -824,11 +825,28 @@ STATUS sessionCleanupWait(PSampleConfiguration pSampleConfiguration, bool isSign
                 MUTEX_UNLOCK(pSampleConfiguration->streamingSessionListReadLock);
                 streamingSessionListReadLockLocked = FALSE;
 
-                CHK_LOG_ERR(freeAppWebRTCSession(&pAppWebRTCSession));
-
                 // Quit the for loop as we have modified the collection and the for loop iterator
                 break;
             }
+        }
+
+        /* Tear the session down with sampleConfigurationObjLock released.
+         * By this point the session is out of the hash table and out of
+         * webrtcSessionList, so nothing else can reach it. freeAppWebRTCSession
+         * closes a peer connection, which takes seconds when it goes well and
+         * has been seen not to return at all. Holding the lock across it stops
+         * every new offer on the device, not just this session: trigger_offer
+         * takes the same lock, so one wedged teardown answers every later
+         * request with offer_timeout. */
+        if (pAppWebRTCSession != NULL) {
+            MUTEX_UNLOCK(pSampleConfiguration->sampleConfigurationObjLock);
+            sampleConfigurationObjLockLocked = FALSE;
+
+            CHK_LOG_ERR(freeAppWebRTCSession(&pAppWebRTCSession));
+            pAppWebRTCSession = NULL;
+
+            MUTEX_LOCK(pSampleConfiguration->sampleConfigurationObjLock);
+            sampleConfigurationObjLockLocked = TRUE;
         }
 
         // Signaling reconnection should be handled by the signaling interface implementation
