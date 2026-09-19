@@ -2083,6 +2083,28 @@ CleanUp:
  * @param pPeerId Peer ID to send the offer to
  * @return STATUS code of the execution
  */
+bool app_webrtc_at_capacity(uint32_t *pActive, uint32_t *pMax)
+{
+    PSampleConfiguration pSampleConfiguration = gSampleConfiguration;
+    UINT32 active, max;
+
+    if (pSampleConfiguration == NULL) {
+        return FALSE;
+    }
+
+    /* Read without the lock, deliberately -- see the header. */
+    active = pSampleConfiguration->streamingSessionCount;
+    max = (UINT32) ARRAY_SIZE(pSampleConfiguration->webrtcSessionList);
+
+    if (pActive != NULL) {
+        *pActive = active;
+    }
+    if (pMax != NULL) {
+        *pMax = max;
+    }
+    return active >= max;
+}
+
 int app_webrtc_trigger_offer(char *pPeerId)
 {
     STATUS retStatus = STATUS_SUCCESS;

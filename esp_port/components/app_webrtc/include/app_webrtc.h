@@ -306,6 +306,30 @@ int app_webrtc_send_msg_to_signaling(webrtc_message_t *message);
 int app_webrtc_trigger_offer(char *pPeerId);
 
 /**
+ * @brief Whether every session slot is in use.
+ *
+ * app_webrtc_trigger_offer returns STATUS_INVALID_OPERATION when the session
+ * list is full, and returns that same code for several unrelated failures, so
+ * a caller cannot tell "no room" from "something broke" by the status alone.
+ * This answers that one question directly.
+ *
+ * It exists so a full device can say so. Refusing silently leaves the browser
+ * waiting for an offer that will never come, until it gives up and reports
+ * the device as not responding -- which is both wrong and useless, since the
+ * device is responding perfectly well and is simply full.
+ *
+ * The counts are read without the lock. They are reported and never acted on,
+ * so a torn read costs a wrong number in a message rather than a wrong
+ * decision, and this is called on a path where a teardown may already be
+ * holding that lock for a long time.
+ *
+ * @param[out] pActive Sessions currently held, may be NULL
+ * @param[out] pMax    Slots in total, may be NULL
+ * @return TRUE when no slot is free
+ */
+bool app_webrtc_at_capacity(uint32_t *pActive, uint32_t *pMax);
+
+/**
  * @brief Declare a data channel to be created before the offer.
  *
  * Must be called before a session starts: the only window in which a channel
