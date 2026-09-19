@@ -105,6 +105,13 @@ add_compile_options(
     -Wno-error=pedantic
 )
 
+# usrsctp's own CMakeLists carries option(sctp_debug ... 1), so it defines
+# SCTP_DEBUG for its 24 sources whatever this file does. Set before the
+# subdirectory is added, because option() honors an already-set value. Without
+# this, turning the instrumentation off silenced two of the three places the
+# flag comes from and the build looked clean while remaining a debug build.
+set(sctp_debug ${CONFIG_KVS_TRANSPORT_INSTRUMENTATION} CACHE BOOL "" FORCE)
+
 # Add usrsctp as a subdirectory
 add_subdirectory(${usrsctp_root_dir} ${CMAKE_CURRENT_BINARY_DIR}/usrsctp)
 
