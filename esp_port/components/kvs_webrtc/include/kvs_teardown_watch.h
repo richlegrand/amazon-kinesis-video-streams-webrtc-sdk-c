@@ -35,6 +35,12 @@ void kvs_teardown_watch_stage(const char *stage);
 /* Teardown finished. Quiet again until the next begin. */
 void kvs_teardown_watch_end(void);
 
+/* Log every task and its state, prefixed with why. For naming the holder of a
+ * lock when the waiter is already known: the mutexes here are pthread-backed,
+ * so there is no owner to ask FreeRTOS for, but whatever holds one is a task
+ * and it will be sitting somewhere conspicuous. */
+void kvs_teardown_watch_dump_tasks(const char *why);
+
 #ifdef __cplusplus
 }
 #endif

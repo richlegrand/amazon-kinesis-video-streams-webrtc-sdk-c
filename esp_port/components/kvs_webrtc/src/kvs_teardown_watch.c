@@ -23,6 +23,9 @@ static int64_t s_begin_us;
 static int64_t s_stage_us;
 static bool s_active;
 static TaskHandle_t s_task;
+/* Whether the task list has already been dumped for the current stage. Reset
+ * on every stage change, so a teardown that sticks twice reports twice. */
+static bool s_dumped;
 
 static const char *task_state_name(TaskHandle_t task)
 {
@@ -73,6 +76,17 @@ static void watch_cb(void *arg)
     ESP_LOGW(TAG, "%s: stuck in '%s' for %lld ms (%lld ms into teardown, task %s)",
              peer, stage ? stage : "?", (now - stage_us) / 1000,
              (now - begin_us) / 1000, task_state_name(task));
+
+    /* Once per stuck stage, not once per tick. The stage says which lock is
+     * being waited on; this says what every other task was doing at the
+     * moment it was still being held, which is the half that was missing. A
+     * list this short makes the one task sitting somewhere it should not be
+     * fairly obvious. Repeating it every 5 s would bury that in its own
+     * output. */
+    if (!s_dumped) {
+        s_dumped = true;
+        kvs_teardown_watch_dump_tasks(peer);
+    }
 }
 
 void kvs_teardown_watch_begin(const char *peer)
@@ -96,6 +110,7 @@ void kvs_teardown_watch_begin(const char *peer)
     s_begin_us = now;
     s_stage_us = now;
     s_active = true;
+    s_dumped = false;
     s_task = xTaskGetCurrentTaskHandle();
     portEXIT_CRITICAL(&s_mux);
 
@@ -103,6 +118,43 @@ void kvs_teardown_watch_begin(const char *peer)
     if (s_timer != NULL) {
         esp_timer_start_periodic(s_timer, WATCH_PERIOD_US);
     }
+}
+
+/* Every task and what it is doing, at one moment.
+ *
+ * For the case where the stage is known and the culprit is not: the teardown
+ * says it is waiting on statsLock, and nothing says who is holding it. The
+ * mutex is pthread-backed here, so FreeRTOS cannot be asked for its owner --
+ * but whatever holds it is a task, and a task that has been blocked or
+ * running for seconds stands out in a list this short.
+ *
+ * Needs the trace facility, which is a menuconfig option. Without it this
+ * says so rather than silently printing nothing, because a diagnostic that
+ * quietly does not run is worse than one that is absent. */
+void kvs_teardown_watch_dump_tasks(const char *why)
+{
+#if (configUSE_TRACE_FACILITY == 1)
+    UBaseType_t n = uxTaskGetNumberOfTasks();
+    TaskStatus_t *tasks = calloc(n, sizeof(TaskStatus_t));
+    if (tasks == NULL) {
+        ESP_LOGW(TAG, "%s: no memory to list %u tasks", why, (unsigned) n);
+        return;
+    }
+
+    n = uxTaskGetSystemState(tasks, n, NULL);
+    ESP_LOGW(TAG, "%s: %u tasks", why, (unsigned) n);
+    for (UBaseType_t i = 0; i < n; i++) {
+        ESP_LOGW(TAG, "  %-18s %-9s prio %2u, stack free %u",
+                 tasks[i].pcTaskName,
+                 task_state_name(tasks[i].xHandle),
+                 (unsigned) tasks[i].uxCurrentPriority,
+                 (unsigned) tasks[i].usStackHighWaterMark);
+    }
+    free(tasks);
+#else
+    ESP_LOGW(TAG, "%s: task list unavailable "
+                  "(enable CONFIG_FREERTOS_USE_TRACE_FACILITY)", why);
+#endif
 }
 
 void kvs_teardown_watch_stage(const char *stage)
@@ -121,6 +173,7 @@ void kvs_teardown_watch_stage(const char *stage)
     if (active) {
         s_stage = stage;
         s_stage_us = now;
+        s_dumped = false;
     }
     portEXIT_CRITICAL(&s_mux);
 

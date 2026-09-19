@@ -228,16 +228,33 @@ static WEBRTC_STATUS kvs_pc_set_ice_servers(void *pPeerConnectionClient, void *i
     // Apply new ICE servers to existing sessions where possible
     // CRITICAL: Use statsLock to synchronize with metrics timer to prevent deadlock
     if (client_data->activeSessions != NULL && IS_VALID_MUTEX_VALUE(client_data->statsLock)) {
+        /* CHK_STATUS jumps to CleanUp, which is past the unlock below. Doing
+         * that while holding statsLock leaks it permanently, and the next
+         * teardown to want it blocks forever while holding the lock that
+         * gates every new connection -- the device stops answering and does
+         * not recover. So the status is carried out of the critical section
+         * and checked after the unlock.
+         *
+         * Never observed firing: the failures in the log are all
+         * STATUS_NULL_ARG from the argument check above, which is nowhere
+         * near this lock. It is a hang waiting for a hash table operation to
+         * have a bad day. */
+        STATUS iceApplyStatus;
         MUTEX_LOCK(client_data->statsLock);
-        CHK_STATUS(hashTableGetCount(client_data->activeSessions, &activeSessionCount));
-        if (activeSessionCount > 0) {
-            ESP_LOGI(TAG, "Progressive ICE: Dynamically applying new ICE servers to %" PRIu32 " existing sessions", activeSessionCount);
-            CHK_STATUS(hashTableIterateEntries(client_data->activeSessions, POINTER_TO_HANDLE(client_data), kvs_applyNewIceServersCallback));
-            ESP_LOGI(TAG, "Progressive ICE: Successfully processed all %" PRIu32 " existing sessions for dynamic updates", activeSessionCount);
-        } else {
-            ESP_LOGI(TAG, "Progressive ICE: No existing sessions to update - new ICE servers will be used for future connections");
+        iceApplyStatus = hashTableGetCount(client_data->activeSessions, &activeSessionCount);
+        if (STATUS_SUCCEEDED(iceApplyStatus)) {
+            if (activeSessionCount > 0) {
+                ESP_LOGI(TAG, "Progressive ICE: Dynamically applying new ICE servers to %" PRIu32 " existing sessions", activeSessionCount);
+                iceApplyStatus = hashTableIterateEntries(client_data->activeSessions, POINTER_TO_HANDLE(client_data), kvs_applyNewIceServersCallback);
+                if (STATUS_SUCCEEDED(iceApplyStatus)) {
+                    ESP_LOGI(TAG, "Progressive ICE: Successfully processed all %" PRIu32 " existing sessions for dynamic updates", activeSessionCount);
+                }
+            } else {
+                ESP_LOGI(TAG, "Progressive ICE: No existing sessions to update - new ICE servers will be used for future connections");
+            }
         }
         MUTEX_UNLOCK(client_data->statsLock);
+        CHK_STATUS(iceApplyStatus);
     } else if (client_data->activeSessions != NULL) {
         // Fallback without synchronization if statsLock is invalid
         CHK_STATUS(hashTableGetCount(client_data->activeSessions, &activeSessionCount));
@@ -708,8 +725,19 @@ static WEBRTC_STATUS kvs_pc_destroy_session(void *pSession)
     if (session->client != NULL && IS_VALID_MUTEX_VALUE(session->client->session_count_mutex) &&
         IS_VALID_MUTEX_VALUE(session->client->ice_state_cleanup_mutex)) {
 
+        /* Every stage from here to "locks released" runs while holding
+         * ice_state_cleanup_mutex, which session creation also takes. A block
+         * anywhere in here stops the device answering any new connection at
+         * all: the browser waits for an offer that is never built, gives up,
+         * and reports the device as not responding. It has been seen stuck
+         * here for 215 s with no recovery short of a reboot.
+         *
+         * Named individually because "begin" covered all four blocking calls
+         * in this section and could not say which one. */
         // CRITICAL: Acquire ICE cleanup lock first to ensure atomic cleanup
+        kvs_teardown_watch_stage("lock: ice_state_cleanup");
         MUTEX_LOCK(session->client->ice_state_cleanup_mutex);
+        kvs_teardown_watch_stage("lock: session_count");
         MUTEX_LOCK(session->client->session_count_mutex);
 
         // Check if this session is still in activeSessions (avoid duplicate cleanup)
@@ -719,6 +747,10 @@ static WEBRTC_STATUS kvs_pc_destroy_session(void *pSession)
         STATUS lookupStatus = STATUS_SUCCESS;
 
         if (IS_VALID_MUTEX_VALUE(session->client->statsLock)) {
+            /* Shared with the metrics timer, per the comment above, and with
+             * the media sender, which holds it across a whole frame dispatch.
+             * This is where the device was observed to wedge. */
+            kvs_teardown_watch_stage("lock: statsLock (lookup)");
             MUTEX_LOCK(session->client->statsLock);
             lookupStatus = hashTableGet(session->client->activeSessions, (UINT64)peerIdHash, &existingSession);
             MUTEX_UNLOCK(session->client->statsLock);
@@ -744,6 +776,10 @@ static WEBRTC_STATUS kvs_pc_destroy_session(void *pSession)
         // Stop global media threads when last session is destroyed
         if (session->client->session_count == 0 && session->client->global_media_started) {
             ESP_LOGI(TAG, "Stopping global media threads for last session: %s", session->peer_id);
+            /* Two THREAD_JOINs, under both locks. This is the call the
+             * "release the mutex before potentially blocking operations"
+             * comment below is about, and it is on the wrong side of it. */
+            kvs_teardown_watch_stage("stop global media (joins sender threads)");
             STATUS media_status = kvs_media_stop_global_transmission(session->client);
             if (STATUS_SUCCEEDED(media_status)) {
                 session->client->global_media_started = FALSE;
@@ -763,6 +799,7 @@ static WEBRTC_STATUS kvs_pc_destroy_session(void *pSession)
             STATUS removeStatus = STATUS_SUCCESS;
 
             if (IS_VALID_MUTEX_VALUE(session->client->statsLock)) {
+                kvs_teardown_watch_stage("lock: statsLock (remove)");
                 MUTEX_LOCK(session->client->statsLock);
                 removeStatus = hashTableRemove(session->client->activeSessions, (UINT64)peerIdHash);
                 MUTEX_UNLOCK(session->client->statsLock);
@@ -787,6 +824,9 @@ static WEBRTC_STATUS kvs_pc_destroy_session(void *pSession)
         // This prevents deadlock if media cleanup or peer connection cleanup hangs
         ESP_LOGI(TAG, "Session cleanup atomicity complete - releasing lock for new connections");
         MUTEX_UNLOCK(session->client->ice_state_cleanup_mutex);
+        /* Past here a block delays this teardown but no longer stops new
+         * connections, which is the difference between slow and dead. */
+        kvs_teardown_watch_stage("locks released");
 
         if (isLastSession) {
             ESP_LOGI(TAG, "Last session cleanup complete - ensuring ICE agent state reset");
@@ -803,6 +843,7 @@ SkipCleanup:
     session->terminated = TRUE;
 
     // Cleanup session-specific media (global media threads handled separately)
+    kvs_teardown_watch_stage("stop session media");
     kvs_media_stop_session(session);
 
 #if KVS_ENABLE_DATA_CHANNEL
