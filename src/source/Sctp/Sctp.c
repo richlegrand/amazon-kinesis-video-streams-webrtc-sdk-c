@@ -1,9 +1,9 @@
 #define LOG_CLASS "SCTP"
 #include "kvs_instrumentation.h"
-#if KVS_INSTR
-/* esp_timer_get_time, used only by the instrumented timing below. */
+/* esp_timer_get_time. Used by the instrumented timing below, and by the
+ * send-buffer warning, which is not instrumentation -- it reports a frame
+ * being dropped and has to be there in a normal build. */
 #include "esp_timer.h"
-#endif
 #include "../Include_i.h"
 #include "esp_log.h"
 
@@ -187,6 +187,8 @@ STATUS createSctpSession(PSctpSessionCallbacks pSctpSessionCallbacks, PSctpSessi
 
     ATOMIC_STORE(&pSctpSession->shutdownStatus, SCTP_SESSION_ACTIVE);
     pSctpSession->sctpSessionCallbacks = *pSctpSessionCallbacks;
+    /* What createSctpSocket configured, for the send-buffer warning. */
+    pSctpSession->sndBufBytes = SCTP_SESSION_SNDBUF_BYTES;
 
     CHK_STATUS(initSctpAddrConn(pSctpSession, &localConn));
     CHK_STATUS(initSctpAddrConn(pSctpSession, &remoteConn));
@@ -270,7 +272,22 @@ CleanUp:
  * Without this the two are indistinguishable: both surface as sends that
  * fail after the buffer-wait timeout, with nothing to say which.
  */
-STATUS sctpSessionGetStats(PSctpSession pSctpSession, PUINT32 pRwnd, PUINT32 pUnacked)
+/* srtt, cwnd and the path MTU come from the primary path, which is already in
+ * the struct being fetched for rwnd -- they were simply being discarded.
+ *
+ * They are what says which limit is actually binding when a send fails. The
+ * send buffer caps bytes in flight, so on a path where it is the constraint
+ * throughput is buffer over srtt and nothing else: at 48 KB, 165 ms of round
+ * trip is about 290 KB/s and 240 ms is about 200 KB/s. Without srtt that
+ * ceiling can only be worked backwards from the frame rate, where it reads as
+ * the camera or the encoder misbehaving rather than the transport being sized
+ * for a different path than the one in use.
+ *
+ * cwnd beside it separates the two cases that want opposite fixes: cwnd
+ * sitting at the buffer limit is a buffer too small for this srtt, and cwnd
+ * well below it is congestion, where a bigger buffer only adds queue. */
+STATUS sctpSessionGetStats(PSctpSession pSctpSession, PUINT32 pRwnd, PUINT32 pUnacked,
+                           PUINT32 pSrttMs, PUINT32 pCwnd, PUINT32 pMtu)
 {
     STATUS retStatus = STATUS_SUCCESS;
     struct sctp_status status;
@@ -283,6 +300,15 @@ STATUS sctpSessionGetStats(PSctpSession pSctpSession, PUINT32 pRwnd, PUINT32 pUn
 
     *pRwnd = status.sstat_rwnd;
     *pUnacked = status.sstat_unackdata;
+    if (pSrttMs != NULL) {
+        *pSrttMs = status.sstat_primary.spinfo_srtt;
+    }
+    if (pCwnd != NULL) {
+        *pCwnd = status.sstat_primary.spinfo_cwnd;
+    }
+    if (pMtu != NULL) {
+        *pMtu = status.sstat_primary.spinfo_mtu;
+    }
 
 CleanUp:
     return retStatus;
@@ -298,8 +324,99 @@ STATUS sctpSessionSetSendBuffer(PSctpSession pSctpSession, INT32 bytes)
     CHK(pSctpSession != NULL && bytes > 0, STATUS_NULL_ARG);
     CHK(usrsctp_setsockopt(pSctpSession->socket, SOL_SOCKET, SO_SNDBUF, &bytes, SIZEOF(bytes)) == 0,
         STATUS_INTERNAL_ERROR);
+    pSctpSession->sndBufBytes = (UINT32) bytes;
 CleanUp:
     return retStatus;
+}
+
+/* Grow the send buffer toward what srtt says this path is carrying.
+ *
+ * Restored after several alternatives measured worse. The note in Sctp.h has
+ * the table, and the reasons it deserves less confidence than it looks like
+ * it does.
+ *
+ * Called from the send path rather than a timer: it needs a session, one
+ * exists here, and a stream that has stopped sending has no buffer worth
+ * sizing. Rate limited on wall clock, so it costs one getsockopt a second
+ * however many frames go out.
+ *
+ * The standing queue is reported beside each decision and deliberately not
+ * acted on. The baseline it is measured against drifts upward on a saturated
+ * link, which makes it a usable readout and an unusable input. */
+static VOID sctpSessionTuneSendBuffer(PSctpSession pSctpSession)
+{
+    INT64 now;
+    UINT32 rwnd = 0, unacked = 0, srtt = 0, cwnd = 0, mtu = 0;
+    UINT32 want, have, delta, baseMs = 0, queueMs = 0;
+
+    if (pSctpSession == NULL) {
+        return;
+    }
+
+    now = esp_timer_get_time();
+    if (now - pSctpSession->lastTuneUs < SCTP_SNDBUF_TUNE_INTERVAL_US) {
+        return;
+    }
+    pSctpSession->lastTuneUs = now;
+
+    if (STATUS_FAILED(sctpSessionGetStats(pSctpSession, &rwnd, &unacked, &srtt, &cwnd, &mtu)) || srtt == 0) {
+        return;
+    }
+
+    if (pSctpSession->srttMinCurMs == 0 || srtt < pSctpSession->srttMinCurMs) {
+        pSctpSession->srttMinCurMs = srtt;
+    }
+    if (now - pSctpSession->srttWindowStartUs > SCTP_SRTT_MIN_WINDOW_US) {
+        pSctpSession->srttMinPrevMs = pSctpSession->srttMinCurMs;
+        pSctpSession->srttMinCurMs = srtt;
+        pSctpSession->srttWindowStartUs = now;
+    }
+    baseMs = (pSctpSession->srttMinPrevMs != 0 && pSctpSession->srttMinPrevMs < pSctpSession->srttMinCurMs)
+        ? pSctpSession->srttMinPrevMs
+        : pSctpSession->srttMinCurMs;
+    queueMs = (srtt > baseMs) ? (srtt - baseMs) : 0;
+
+    want = (UINT32) (((UINT64) SCTP_SNDBUF_TARGET_BYTES_PER_SEC * (UINT64) srtt) / 1000);
+    if (want < SCTP_SNDBUF_MIN_BYTES) {
+        want = SCTP_SNDBUF_MIN_BYTES;
+    } else if (want > SCTP_SNDBUF_MAX_BYTES) {
+        want = SCTP_SNDBUF_MAX_BYTES;
+    }
+
+    /* A periodic line whether or not anything changed.
+     *
+     * Every other transport number in this file is printed from inside the
+     * drop warning, so the whole record is sampled at moments of failure and
+     * there is nothing to compare it against. That is why a link which spends
+     * minutes in a low frame rate and then recovers -- the behavior this
+     * camera has shown since mjpeg streaming first worked -- cannot be
+     * characterized: nobody has ever seen what the healthy half looks like.
+     *
+     * Everything here was already fetched a line above and discarded unless
+     * the buffer happened to need resizing. */
+    if (now - pSctpSession->lastReportUs >= SCTP_SNDBUF_REPORT_INTERVAL_US) {
+        pSctpSession->lastReportUs = now;
+        ESP_LOGI("sctp", "health: srtt %u ms (base %u, queue %u), cwnd %u, buf %u,"
+                 " inflight %u, rwnd %u",
+                 (unsigned) srtt, (unsigned) baseMs, (unsigned) queueMs,
+                 (unsigned) cwnd, (unsigned) pSctpSession->sndBufBytes,
+                 (unsigned) (unacked * (mtu != 0 ? mtu : SCTP_MTU)), (unsigned) rwnd);
+    }
+
+    have = pSctpSession->sndBufBytes;
+    delta = (want > have) ? (want - have) : (have - want);
+    if (delta < SCTP_SNDBUF_HYSTERESIS_BYTES) {
+        return;
+    }
+
+    if (STATUS_SUCCEEDED(sctpSessionSetSendBuffer(pSctpSession, (INT32) want))) {
+        ESP_LOGI("sctp", "send buffer %u -> %u bytes (srtt %u ms, base %u, queue %u ms, cwnd %u)",
+                 (unsigned) have, (unsigned) want, (unsigned) srtt,
+                 (unsigned) baseMs, (unsigned) queueMs, (unsigned) cwnd);
+    } else {
+        ESP_LOGW("sctp", "send buffer resize to %u bytes refused (srtt %u ms)",
+                 (unsigned) want, (unsigned) srtt);
+    }
 }
 
 #ifdef SCTP_TCB_LOCK_TIMING
@@ -491,6 +608,8 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
      * Wait for space instead, bounded so a dead association cannot park the
      * caller forever. This is the equivalent of gating on bufferedAmount,
      * which is what the browser-side APIs expose and this one does not. */
+    sctpSessionTuneSendBuffer(pSctpSession);
+
     {
         INT32 sent;
         UINT32 waitedMs = 0;
@@ -508,15 +627,26 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
                 break;
             }
             if (waitedMs >= maxWaitMs) {
-                UINT32 rwnd = 0, unacked = 0;
-                sctpSessionGetStats(pSctpSession, &rwnd, &unacked);
+                UINT32 rwnd = 0, unacked = 0, srtt = 0, cwnd = 0, mtu = 0;
+                sctpSessionGetStats(pSctpSession, &rwnd, &unacked, &srtt, &cwnd, &mtu);
                 /* ESP_LOGW, not DLOGW: the KVS logger's level is set from
                  * app_webrtc's config and swallows this exactly when it
-                 * matters most. */
+                 * matters most.
+                 *
+                 * srtt and cwnd say which limit is binding. A wide-open rwnd
+                 * with cwnd pinned at SCTP_SESSION_SNDBUF_BYTES is the buffer
+                 * being the ceiling, and then the throughput on offer is just
+                 * buffer over srtt -- there is nothing wrong upstream and
+                 * sending less is the only thing that helps. */
+                INT64 quietMs = (esp_timer_get_time() - pSctpSession->lastInboundUs) / 1000;
                 ESP_LOGW("sctp", "send buffer still full after %u ms, dropping %u bytes"
-                         " (peer rwnd %u, unacked %u chunks)",
+                         " (buf %u, peer rwnd %u, unacked %u chunks, srtt %u ms, cwnd %u,"
+                         " mtu %u, last inbound %lld ms ago)",
                          (unsigned) waitedMs, (unsigned) pMessageLen,
-                         (unsigned) rwnd, (unsigned) unacked);
+                         (unsigned) pSctpSession->sndBufBytes,
+                         (unsigned) rwnd, (unsigned) unacked,
+                         (unsigned) srtt, (unsigned) cwnd, (unsigned) mtu,
+                         (long long) quietMs);
                 break;
             }
             THREAD_SLEEP(SCTP_SEND_BUFFER_RETRY_MS * HUNDREDS_OF_NANOS_IN_A_MILLISECOND);
@@ -642,6 +772,13 @@ STATUS putSctpPacket(PSctpSession pSctpSession, PBYTE buf, UINT32 bufLen)
 {
     ENTERS();
     STATUS retStatus = STATUS_SUCCESS;
+
+    /* Stamped before the handoff, not after: usrsctp_conninput does the
+       association work inline, so timing it afterwards would fold that cost
+       into the gap this is meant to measure. */
+    if (pSctpSession != NULL) {
+        pSctpSession->lastInboundUs = esp_timer_get_time();
+    }
 
     usrsctp_conninput(pSctpSession, buf, bufLen, 0);
 
