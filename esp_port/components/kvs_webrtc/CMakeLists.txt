@@ -163,7 +163,6 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC
     -DSCTP_SIMPLE_ALLOCATOR
     -D__Userspace__
     -DINET=1
-    -DSCTP_DEBUG=1
     -DSCTP_USE_IPV6=0
     -DSCTP_USE_MBEDTLS_SHA1=1
 )
@@ -203,7 +202,6 @@ add_definitions(
   "-DSCTP_SIMPLE_ALLOCATOR"
   "-D__Userspace__"
   "-DINET=1"
-  "-DSCTP_DEBUG=1"
   "-DSCTP_USE_IPV6=0"
   "-DSCTP_USE_MBEDTLS_SHA1=1"
 )
@@ -222,4 +220,7 @@ target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-error=stringop-truncation)
 # headers and implemented here, so both sides need the same define.
 if(CONFIG_KVS_TRANSPORT_INSTRUMENTATION)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC SCTP_TCB_LOCK_TIMING)
+    # See esp_usrsctp/CMakeLists.txt: on rather than off costs a branch at every
+    # SCTPDBG site in the packet path, and prints nothing either way.
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC SCTP_DEBUG=1)
 endif()

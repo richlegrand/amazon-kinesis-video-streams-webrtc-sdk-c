@@ -38,7 +38,17 @@ endif()
 add_definitions(-DSCTP_SIMPLE_ALLOCATOR)
 add_definitions(-DHAVE_SYS_QUEUE_H)
 add_definitions(-DHAVE_STDATOMIC_H)
-add_definitions(-DSCTP_DEBUG)
+# Off by default, with the rest of the instrumentation.
+#
+# SCTP_DEBUG does not print anything on its own -- every SCTPDBG site becomes a
+# load of sctp_debug_on and a branch, and there are hundreds of them through
+# packet processing. That is cheap per site and not free at 10.8 ms of usrsctp
+# time per inbound packet, which is what this port actually costs. Leaving it
+# on unconditionally meant every measurement of the transport was taken on a
+# debug build and then described as a property of the hardware.
+if(CONFIG_KVS_TRANSPORT_INSTRUMENTATION)
+    add_definitions(-DSCTP_DEBUG)
+endif()
 add_definitions(-DESP_PLATFORM)
 
 if(sctp_use_lwip)
