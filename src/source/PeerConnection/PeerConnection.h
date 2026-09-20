@@ -17,13 +17,34 @@ PeerConnection internal include file
 extern "C" {
 #endif
 
-/* The outbound DTLS queue. Depth is about 140 ms of packets at the rate this
-   link runs, which absorbs a burst without letting a stall build a backlog of
-   stale video. Slot size covers a full SCTP packet at this port's 1200 byte
-   path MTU with room over. Stack is sized for an mbedtls record write and
-   lives in PSRAM; its high-water mark is logged when the task stops. */
-#define KVS_DTLS_OUT_QUEUE_DEPTH 32
-#define KVS_DTLS_OUT_PACKET_MAX  1400
+/* The outbound DTLS queue.
+ *
+ * Bounded by bytes held rather than by a slot count, and each packet is
+ * allocated to its own length.
+ *
+ * It began as a fixed ring of 32 slots at 1402 bytes, which was wrong twice
+ * over. Too small: usrsctp emits a whole congestion window from one
+ * sctp_chunk_output pass, and the peak measured here is 47 KB, or about 39
+ * packets at a 1200 byte MTU. Every full-window burst overflowed a 32 deep
+ * ring, and the tail it spilled showed up as a steady 0.5% of packets --
+ * 301 in one session. Too fixed: 45 KB was held per active peer to serve an
+ * average depth of roughly one packet, and a 40 byte SACK paid the same 1402
+ * bytes as a full video fragment.
+ *
+ * 128 KB is a little under three times that measured peak, so reaching it
+ * means the consumer has genuinely stopped rather than merely fallen behind
+ * a burst -- and that is the case that must drop rather than grow. Holding
+ * more there would only add latency to packets SCTP is about to retransmit
+ * anyway. */
+#define KVS_DTLS_OUT_MAX_BYTES   (128 * 1024)
+/* The queue itself holds pointers, so this is 512 bytes of storage rather
+   than a slot per packet body -- which is what makes a count this far above a
+   full window free. Memory is bounded by the byte cap above; this only has to
+   be large enough that a legitimate burst never runs out of slots. */
+#define KVS_DTLS_OUT_MAX_PACKETS 128
+/* A guard, not a slot size: the path MTU is 1200, so nothing legitimate comes
+   close. It exists so a corrupt length cannot turn into a wild allocation. */
+#define KVS_DTLS_OUT_PACKET_MAX  1500
 #define KVS_DTLS_OUT_STACK       (8 * 1024)
 #define KVS_DTLS_OUT_PRIO        6
 
@@ -182,20 +203,36 @@ typedef struct {
      *
      * Dropping when the queue is full is deliberate. Blocking would put the
      * wait back inside the lock, which is the whole problem, and a dropped
-     * SCTP packet looks like the network loss the protocol already handles. */
+     * SCTP packet looks like the network loss the protocol already handles.
+     *
+     * The queue carries pointers; the packets themselves are MEMALLOC'd to
+     * their own length, which on this port puts them in PSRAM. So what is
+     * held tracks what is actually in flight, and a forty byte SACK costs
+     * forty bytes rather than a full slot.
+     *
+     * A FreeRTOS queue for the handoff, not the SDK's SafeBlockingQueue. That
+     * was tried and wedges: its semaphore raises CVAR_SIGNAL without holding
+     * the mutex its waiter blocks on, and the wait has no predicate to
+     * re-check -- the source says as much -- so a release landing between the
+     * waiter's atomic decrement and its CVAR_WAIT is lost and the consumer
+     * sleeps for good. Measured: healthy at 259 KB/s, then nothing drained,
+     * the SCTP buffer filled, sends failed, and teardown blocked on the join
+     * until the session cap was reached. */
     QueueHandle_t dtlsOutQueue;
-    TaskHandle_t dtlsOutTask;
-    StaticQueue_t dtlsOutQueueBuf;
-    StaticTask_t* dtlsOutTcb;
-    PVOID dtlsOutStack;
-    PVOID dtlsOutStorage;
+    TID dtlsOutTid;
     volatile SIZE_T dtlsOutRunning;
-    /* Set by the routine as its last act, once it is out of the queue loop
-       and about to suspend itself. The stopper waits for this rather than for
-       eTaskGetState, which reports eDeleted before the kernel has finished
-       with the task. See stopDtlsOutTask. */
-    volatile SIZE_T dtlsOutParked;
-    UINT32 dtlsOutDropped;
+    /* Bytes currently queued, which is what the cap is applied to. Atomic
+       because the producer adds under usrsctp's lock and the consumer
+       subtracts on its own thread. */
+    volatile SIZE_T dtlsOutBytes;
+    UINT32 dtlsOutBytesPeak;
+    /* Split, because one counter could not say which of these happened and
+       the line that distinguished them was a DLOGW this build filters out.
+       Oversize should never be non-zero; if it is, the MTU assumption above
+       is wrong. */
+    UINT32 dtlsOutDroppedFull;
+    UINT32 dtlsOutDroppedOversize;
+    UINT32 dtlsOutDroppedNoMem;
 } KvsPeerConnection, *PKvsPeerConnection;
 
 typedef struct {
