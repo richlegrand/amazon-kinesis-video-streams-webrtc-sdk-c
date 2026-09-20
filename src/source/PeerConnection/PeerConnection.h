@@ -190,6 +190,11 @@ typedef struct {
     PVOID dtlsOutStack;
     PVOID dtlsOutStorage;
     volatile SIZE_T dtlsOutRunning;
+    /* Set by the routine as its last act, once it is out of the queue loop
+       and about to suspend itself. The stopper waits for this rather than for
+       eTaskGetState, which reports eDeleted before the kernel has finished
+       with the task. See stopDtlsOutTask. */
+    volatile SIZE_T dtlsOutParked;
     UINT32 dtlsOutDropped;
 } KvsPeerConnection, *PKvsPeerConnection;
 

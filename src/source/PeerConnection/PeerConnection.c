@@ -642,7 +642,8 @@ static VOID dtlsOutRoutine(PVOID arg)
     if (pPkt == NULL) {
         DLOGE("dtls out: no memory for a packet buffer; sends will stay on the lock");
         ATOMIC_STORE(&pKvsPeerConnection->dtlsOutRunning, 0);
-        vTaskDelete(NULL);
+        ATOMIC_STORE(&pKvsPeerConnection->dtlsOutParked, 1);
+        vTaskSuspend(NULL);   /* the stopper deletes us -- see the note below */
         return;
     }
 
@@ -658,9 +659,9 @@ static VOID dtlsOutRoutine(PVOID arg)
         }
     }
 
-    /* Read here rather than from the stopper: by the time that sees eDeleted
-       the handle is gone, and asking a deleted task for its stack is a
-       use-after-free. */
+    /* Read here rather than from the stopper: by the time that sees the task
+       parked the handle is about to go, and asking a deleted task for its
+       stack is a use-after-free. */
     /* ESP_LOGI, not DLOGI: the KVS logger's level is set from app_webrtc's
        config and swallows DLOGI entirely -- this line never printed once. */
     ESP_LOGI("dtlsout", "stopping, stack high-water %u of %u bytes, %u dropped",
@@ -668,7 +669,28 @@ static VOID dtlsOutRoutine(PVOID arg)
              (unsigned) pKvsPeerConnection->dtlsOutDropped);
 
     SAFE_MEMFREE(pPkt);
-    vTaskDelete(NULL);
+
+    /* Park, rather than delete ourselves.
+     *
+     * vTaskDelete(NULL) does not finish the job: it puts the task on the
+     * kernel's termination list and leaves the reaping to the idle task,
+     * while eTaskGetState answers eDeleted from the moment it lands there.
+     * The stopper believed that answer and freed this TCB while the kernel
+     * still held a pointer to it.
+     *
+     * With the internal heap near its floor the next peer's task allocated
+     * the very same block forty milliseconds later. Idle then reaped the
+     * stale entry, unlinking what was by then a live task's state list item
+     * while that task sat in its queue's waiting list -- and the crash landed
+     * half a second later inside xQueueSend, walking the broken list. It took
+     * a reconnect to reach, which is why it survived a long soak.
+     *
+     * Suspended here instead, and deleted by the stopper. Deleting another
+     * task is synchronous as long as that task is not running on either core,
+     * so by the time vTaskDelete returns there the kernel is done with this
+     * TCB and the memory really is free to release. */
+    ATOMIC_STORE(&pKvsPeerConnection->dtlsOutParked, 1);
+    vTaskSuspend(NULL);
 }
 
 VOID onSctpSessionOutboundPacket(UINT64 customData, PBYTE pPacket, UINT32 packetLen)
@@ -730,6 +752,7 @@ STATUS startDtlsOutTask(PKvsPeerConnection pKvsPeerConnection)
                                                           &pKvsPeerConnection->dtlsOutQueueBuf);
     CHK(pKvsPeerConnection->dtlsOutQueue != NULL, STATUS_NOT_ENOUGH_MEMORY);
 
+    ATOMIC_STORE(&pKvsPeerConnection->dtlsOutParked, 0);
     ATOMIC_STORE(&pKvsPeerConnection->dtlsOutRunning, 1);
     pKvsPeerConnection->dtlsOutTask =
         xTaskCreateStatic(dtlsOutRoutine, "dtlsOut", KVS_DTLS_OUT_STACK, pKvsPeerConnection, KVS_DTLS_OUT_PRIO,
@@ -760,14 +783,37 @@ VOID stopDtlsOutTask(PKvsPeerConnection pKvsPeerConnection)
     ATOMIC_STORE(&pKvsPeerConnection->dtlsOutRunning, 0);
 
     if (pKvsPeerConnection->dtlsOutTask != NULL) {
-        /* The routine waits at most 100 ms on the queue, then deletes itself.
-           Waiting for that rather than vTaskDelete from here, so it is never
-           killed in the middle of an mbedtls write. */
-        for (UINT32 i = 0; i < 40 && eTaskGetState(pKvsPeerConnection->dtlsOutTask) != eDeleted; i++) {
+        BOOL parked = FALSE;
+
+        /* Wait for the routine to park itself, which it does after leaving
+           the queue loop -- at most 100 ms of poll, plus however long an
+           mbedtls write it was already inside takes to finish. Waiting rather
+           than deleting it where it stands, so it is never killed mid-write.
+
+           Both conditions, and in this order. The flag says the routine is
+           done touching anything; eSuspended says the kernel has it parked
+           and running on neither core, which is what makes the delete below
+           synchronous. */
+        for (UINT32 i = 0; i < 40; i++) {
+            if (ATOMIC_LOAD(&pKvsPeerConnection->dtlsOutParked) != 0 &&
+                eTaskGetState(pKvsPeerConnection->dtlsOutTask) == eSuspended) {
+                parked = TRUE;
+                break;
+            }
             THREAD_SLEEP(10 * HUNDREDS_OF_NANOS_IN_A_MILLISECOND);
         }
-        if (eTaskGetState(pKvsPeerConnection->dtlsOutTask) != eDeleted) {
-            DLOGW("dtls out: task did not exit; leaking its stack rather than freeing it underneath");
+
+        if (parked) {
+            /* Deleting a task other than the caller, and one that is not
+               running, unlinks it and finishes with its TCB before this
+               returns -- unlike vTaskDelete(NULL), which defers that to the
+               idle task and leaves eTaskGetState lying about it. Freeing the
+               stack and TCB below is only safe on this side of that call.
+               See the note at the end of dtlsOutRoutine for what the old
+               version cost. */
+            vTaskDelete(pKvsPeerConnection->dtlsOutTask);
+        } else {
+            DLOGW("dtls out: task did not park; leaking its stack rather than freeing it underneath");
             pKvsPeerConnection->dtlsOutStack = NULL;
             pKvsPeerConnection->dtlsOutTcb = NULL;
         }
