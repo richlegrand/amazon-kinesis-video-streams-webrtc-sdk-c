@@ -6,9 +6,26 @@ PeerConnection internal include file
 
 #pragma once
 
+/* For the outbound DTLS queue and its task, at the bottom of KvsPeerConnection.
+   This fork is ESP-only, and Sctp.c and the teardown watch already depend on
+   FreeRTOS directly. */
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* The outbound DTLS queue. Depth is about 140 ms of packets at the rate this
+   link runs, which absorbs a burst without letting a stall build a backlog of
+   stale video. Slot size covers a full SCTP packet at this port's 1200 byte
+   path MTU with room over. Stack is sized for an mbedtls record write and
+   lives in PSRAM; its high-water mark is logged when the task stops. */
+#define KVS_DTLS_OUT_QUEUE_DEPTH 32
+#define KVS_DTLS_OUT_PACKET_MAX  1400
+#define KVS_DTLS_OUT_STACK       (8 * 1024)
+#define KVS_DTLS_OUT_PRIO        6
 
 #define LOCAL_ICE_UFRAG_LEN 4
 #define LOCAL_ICE_PWD_LEN   24
@@ -148,6 +165,32 @@ typedef struct {
 
     UINT64 iceConnectingStartTime;
     KvsPeerConnectionDiagnostics peerConnectionDiagnostics;
+
+    /* Outbound SCTP packets, waiting to be encrypted and sent.
+     *
+     * usrsctp calls conn_output with the association's TCB lock held, and a
+     * whole DTLS encryption plus socket write used to happen inside it.
+     * Measured: the lock held for 510 ms of every second at 1.65 ms a time,
+     * which lands on the 1.72 ms of mbedtls_ssl_write almost exactly, while
+     * the receiver spent 256 ms/s blocked on that same lock. One association
+     * carries every data channel, so a sender busy encrypting stalls the
+     * acknowledgements that would let it send more.
+     *
+     * Copying the packet here and returning takes the encryption out of the
+     * lock. usrsctp frees the buffer the moment conn_output returns, so a
+     * copy was always required.
+     *
+     * Dropping when the queue is full is deliberate. Blocking would put the
+     * wait back inside the lock, which is the whole problem, and a dropped
+     * SCTP packet looks like the network loss the protocol already handles. */
+    QueueHandle_t dtlsOutQueue;
+    TaskHandle_t dtlsOutTask;
+    StaticQueue_t dtlsOutQueueBuf;
+    StaticTask_t* dtlsOutTcb;
+    PVOID dtlsOutStack;
+    PVOID dtlsOutStorage;
+    volatile SIZE_T dtlsOutRunning;
+    UINT32 dtlsOutDropped;
 } KvsPeerConnection, *PKvsPeerConnection;
 
 typedef struct {
@@ -178,6 +221,8 @@ typedef struct {
 STATUS onFrameReadyFunc(UINT64, UINT16, UINT16, UINT32);
 STATUS onFrameDroppedFunc(UINT64, UINT16, UINT16, UINT32);
 VOID onSctpSessionOutboundPacket(UINT64, PBYTE, UINT32);
+STATUS startDtlsOutTask(PKvsPeerConnection);
+VOID stopDtlsOutTask(PKvsPeerConnection);
 VOID onSctpSessionDataChannelMessage(UINT64, UINT32, BOOL, PBYTE, UINT32);
 VOID onSctpSessionDataChannelOpen(UINT64, UINT32, PBYTE, UINT32, BYTE, UINT32);
 

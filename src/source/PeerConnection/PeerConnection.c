@@ -1,4 +1,5 @@
 #define LOG_CLASS "PeerConnection"
+#include "esp_log.h"
 
 #include "../Include_i.h"
 #include "kvs_teardown_watch.h"
@@ -134,6 +135,10 @@ STATUS allocateSctp(PKvsPeerConnection pKvsPeerConnection)
     sctpSessionCallbacks.dataChannelMessageFunc = onSctpSessionDataChannelMessage;
     sctpSessionCallbacks.dataChannelOpenFunc = onSctpSessionDataChannelOpen;
     sctpSessionCallbacks.customData = (UINT64) pKvsPeerConnection;
+    /* Before the session exists, so the first conn_output already has
+       somewhere to put its packet. A failure here is not fatal: the callback
+       falls back to encrypting inline, which is what it always did. */
+    CHK_LOG_ERR(startDtlsOutTask(pKvsPeerConnection));
     CHK_STATUS(createSctpSession(&sctpSessionCallbacks, &(pKvsPeerConnection->pSctpSession)));
 
     for (; currentDataChannelId < data.currentDataChannelId; currentDataChannelId += 2) {
@@ -588,22 +593,163 @@ CleanUp:
     LEAVES();
 }
 
-VOID onSctpSessionOutboundPacket(UINT64 customData, PBYTE pPacket, UINT32 packetLen)
+/* One queued outbound packet. Sized for a full SCTP packet at this port's
+   path MTU with room over; anything larger is a bug elsewhere and is dropped
+   rather than truncated. */
+typedef struct {
+    UINT16 len;
+    BYTE data[KVS_DTLS_OUT_PACKET_MAX];
+} DtlsOutPacket;
+
+/* Encrypt and send, off the association lock. See KvsPeerConnection. */
+static VOID dtlsOutRoutine(PVOID arg)
 {
-    ENTERS();
-    STATUS retStatus = STATUS_SUCCESS;
-    PKvsPeerConnection pKvsPeerConnection = NULL;
-    if (customData == 0) {
+    PKvsPeerConnection pKvsPeerConnection = (PKvsPeerConnection) arg;
+    DtlsOutPacket* pPkt = (DtlsOutPacket*) MEMALLOC(SIZEOF(DtlsOutPacket));
+
+    if (pPkt == NULL) {
+        DLOGE("dtls out: no memory for a packet buffer; sends will stay on the lock");
+        ATOMIC_STORE(&pKvsPeerConnection->dtlsOutRunning, 0);
+        vTaskDelete(NULL);
         return;
     }
 
+    while (ATOMIC_LOAD(&pKvsPeerConnection->dtlsOutRunning) != 0) {
+        /* Bounded, so a session going away is noticed even with nothing to
+           send. */
+        if (xQueueReceive(pKvsPeerConnection->dtlsOutQueue, pPkt, pdMS_TO_TICKS(100)) != pdTRUE) {
+            continue;
+        }
+        if (STATUS_FAILED(dtlsSessionPutApplicationData(pKvsPeerConnection->pDtlsSession, pPkt->data, pPkt->len))) {
+            /* Already logged inside. Nothing useful to do here: the peer will
+               notice a missing packet the same way it notices a lost one. */
+        }
+    }
+
+    /* Read here rather than from the stopper: by the time that sees eDeleted
+       the handle is gone, and asking a deleted task for its stack is a
+       use-after-free. */
+    /* ESP_LOGI, not DLOGI: the KVS logger's level is set from app_webrtc's
+       config and swallows DLOGI entirely -- this line never printed once. */
+    ESP_LOGI("dtlsout", "stopping, stack high-water %u of %u bytes, %u dropped",
+             (unsigned) uxTaskGetStackHighWaterMark(NULL), (unsigned) KVS_DTLS_OUT_STACK,
+             (unsigned) pKvsPeerConnection->dtlsOutDropped);
+
+    SAFE_MEMFREE(pPkt);
+    vTaskDelete(NULL);
+}
+
+VOID onSctpSessionOutboundPacket(UINT64 customData, PBYTE pPacket, UINT32 packetLen)
+{
+    PKvsPeerConnection pKvsPeerConnection = NULL;
+    DtlsOutPacket pkt;
+
+    if (customData == 0) {
+        return;
+    }
     pKvsPeerConnection = (PKvsPeerConnection) customData;
-    CHK_STATUS(dtlsSessionPutApplicationData(pKvsPeerConnection->pDtlsSession, pPacket, packetLen));
+
+    /* Called with usrsctp's association lock held, so it copies and leaves.
+       Everything expensive happens on dtlsOutRoutine. */
+    if (pKvsPeerConnection->dtlsOutQueue == NULL || ATOMIC_LOAD(&pKvsPeerConnection->dtlsOutRunning) == 0) {
+        /* Before the queue exists or after it has been shut down, which
+           covers the handshake and teardown. Sending inline is what this
+           always used to do. */
+        CHK_LOG_ERR(dtlsSessionPutApplicationData(pKvsPeerConnection->pDtlsSession, pPacket, packetLen));
+        return;
+    }
+
+    if (packetLen > KVS_DTLS_OUT_PACKET_MAX) {
+        DLOGW("dtls out: %u byte packet exceeds the %u byte queue slot; dropping", packetLen,
+              (UINT32) KVS_DTLS_OUT_PACKET_MAX);
+        pKvsPeerConnection->dtlsOutDropped++;
+        return;
+    }
+
+    pkt.len = (UINT16) packetLen;
+    MEMCPY(pkt.data, pPacket, packetLen);
+
+    /* Zero wait, deliberately -- see the note on the queue. */
+    if (xQueueSend(pKvsPeerConnection->dtlsOutQueue, &pkt, 0) != pdTRUE) {
+        pKvsPeerConnection->dtlsOutDropped++;
+    }
+}
+
+STATUS startDtlsOutTask(PKvsPeerConnection pKvsPeerConnection)
+{
+    STATUS retStatus = STATUS_SUCCESS;
+
+    CHK(pKvsPeerConnection != NULL, STATUS_NULL_ARG);
+    CHK(pKvsPeerConnection->dtlsOutQueue == NULL, retStatus);   /* already running */
+
+    /* Storage and stack in PSRAM: the queue alone is tens of kilobytes and
+       the internal heap on this board runs close to its floor. */
+    pKvsPeerConnection->dtlsOutStorage =
+        heap_caps_calloc_prefer(KVS_DTLS_OUT_QUEUE_DEPTH, SIZEOF(DtlsOutPacket), 2, MALLOC_CAP_SPIRAM, MALLOC_CAP_INTERNAL);
+    pKvsPeerConnection->dtlsOutStack =
+        heap_caps_calloc_prefer(1, KVS_DTLS_OUT_STACK, 2, MALLOC_CAP_SPIRAM, MALLOC_CAP_INTERNAL);
+    pKvsPeerConnection->dtlsOutTcb = (StaticTask_t*) heap_caps_calloc(1, SIZEOF(StaticTask_t), MALLOC_CAP_INTERNAL);
+    CHK(pKvsPeerConnection->dtlsOutStorage != NULL && pKvsPeerConnection->dtlsOutStack != NULL &&
+            pKvsPeerConnection->dtlsOutTcb != NULL,
+        STATUS_NOT_ENOUGH_MEMORY);
+
+    pKvsPeerConnection->dtlsOutQueue = xQueueCreateStatic(KVS_DTLS_OUT_QUEUE_DEPTH, SIZEOF(DtlsOutPacket),
+                                                          (uint8_t*) pKvsPeerConnection->dtlsOutStorage,
+                                                          &pKvsPeerConnection->dtlsOutQueueBuf);
+    CHK(pKvsPeerConnection->dtlsOutQueue != NULL, STATUS_NOT_ENOUGH_MEMORY);
+
+    ATOMIC_STORE(&pKvsPeerConnection->dtlsOutRunning, 1);
+    pKvsPeerConnection->dtlsOutTask =
+        xTaskCreateStatic(dtlsOutRoutine, "dtlsOut", KVS_DTLS_OUT_STACK, pKvsPeerConnection, KVS_DTLS_OUT_PRIO,
+                          (StackType_t*) pKvsPeerConnection->dtlsOutStack, pKvsPeerConnection->dtlsOutTcb);
+    CHK(pKvsPeerConnection->dtlsOutTask != NULL, STATUS_INTERNAL_ERROR);
+
+    ESP_LOGI("dtlsout", "encrypting off the association lock, %u slots", (UINT32) KVS_DTLS_OUT_QUEUE_DEPTH);
 
 CleanUp:
-    CHK_LOG_ERR(retStatus);
+    if (STATUS_FAILED(retStatus)) {
+        /* Leave dtlsOutQueue NULL so sends fall back to the inline path. */
+        stopDtlsOutTask(pKvsPeerConnection);
+    }
+    return retStatus;
+}
 
-    LEAVES();
+/* Must run while the DTLS session is still alive, and after the SCTP session
+   is gone so nothing can enqueue behind us. freePeerConnection frees SCTP
+   first, which is the window this relies on. */
+VOID stopDtlsOutTask(PKvsPeerConnection pKvsPeerConnection)
+{
+    if (pKvsPeerConnection == NULL) {
+        return;
+    }
+
+    /* Cleared unconditionally, so a half-built task -- queue created, task
+       creation failed -- also leaves the callback on its inline path. */
+    ATOMIC_STORE(&pKvsPeerConnection->dtlsOutRunning, 0);
+
+    if (pKvsPeerConnection->dtlsOutTask != NULL) {
+        /* The routine waits at most 100 ms on the queue, then deletes itself.
+           Waiting for that rather than vTaskDelete from here, so it is never
+           killed in the middle of an mbedtls write. */
+        for (UINT32 i = 0; i < 40 && eTaskGetState(pKvsPeerConnection->dtlsOutTask) != eDeleted; i++) {
+            THREAD_SLEEP(10 * HUNDREDS_OF_NANOS_IN_A_MILLISECOND);
+        }
+        if (eTaskGetState(pKvsPeerConnection->dtlsOutTask) != eDeleted) {
+            DLOGW("dtls out: task did not exit; leaking its stack rather than freeing it underneath");
+            pKvsPeerConnection->dtlsOutStack = NULL;
+            pKvsPeerConnection->dtlsOutTcb = NULL;
+        }
+        pKvsPeerConnection->dtlsOutTask = NULL;
+    }
+
+    if (pKvsPeerConnection->dtlsOutDropped > 0) {
+        DLOGW("dtls out: dropped %u packets for want of queue space", pKvsPeerConnection->dtlsOutDropped);
+    }
+
+    pKvsPeerConnection->dtlsOutQueue = NULL;
+    SAFE_MEMFREE(pKvsPeerConnection->dtlsOutStorage);
+    SAFE_MEMFREE(pKvsPeerConnection->dtlsOutStack);
+    SAFE_MEMFREE(pKvsPeerConnection->dtlsOutTcb);
 }
 
 VOID onSctpSessionDataChannelMessage(UINT64 customData, UINT32 channelId, BOOL isBinary, PBYTE pMessage, UINT32 pMessageLen)
@@ -1156,6 +1302,12 @@ STATUS freePeerConnection(PRtcPeerConnection* ppPeerConnection)
     }
 
     // Free DataChannels
+    /* SCTP is gone by here, so nothing can enqueue behind us, and the DTLS
+       session is still alive so the task can finish whatever it is writing.
+       That ordering is the whole safety argument -- see stopDtlsOutTask. */
+    kvs_teardown_watch_stage("stop dtls out task");
+    stopDtlsOutTask(pKvsPeerConnection);
+
     kvs_teardown_watch_stage("free: data channels");
     CHK_LOG_ERR(hashTableIterateEntries(pKvsPeerConnection->pDataChannels, 0, freeHashEntry));
     CHK_LOG_ERR(hashTableFree(pKvsPeerConnection->pDataChannels));
