@@ -329,35 +329,35 @@ CleanUp:
     return retStatus;
 }
 
-/* Grow the send buffer toward what srtt says this path is carrying.
+/* Say what the transport is doing, on a timer rather than only on failure.
  *
- * Restored after several alternatives measured worse. The note in Sctp.h has
- * the table, and the reasons it deserves less confidence than it looks like
- * it does.
+ * Every other number in this file is printed from inside the send-failure
+ * warning, so the whole record was sampled at moments of failure with nothing
+ * to compare against. That is why a link which spends minutes at a low frame
+ * rate and then recovers could not be characterized: nobody had seen the
+ * healthy half.
  *
- * Called from the send path rather than a timer: it needs a session, one
- * exists here, and a stream that has stopped sending has no buffer worth
- * sizing. Rate limited on wall clock, so it costs one getsockopt a second
- * however many frames go out.
+ * It reports and decides nothing. An earlier version of this also sized the
+ * send buffer from what it read here, which failed three ways and is written
+ * up in the header. The numbers were always the useful part.
  *
- * The standing queue is reported beside each decision and deliberately not
- * acted on. The baseline it is measured against drifts upward on a saturated
- * link, which makes it a usable readout and an unusable input. */
-static VOID sctpSessionTuneSendBuffer(PSctpSession pSctpSession)
+ * `queue` is srtt above the smallest srtt seen recently, which is the standing
+ * queue. Read it as movement, not as an absolute: the baseline is only honest
+ * while nothing is queued, and on a saturated link it drifts upward. */
+static VOID sctpSessionReportHealth(PSctpSession pSctpSession)
 {
     INT64 now;
-    UINT32 rwnd = 0, unacked = 0, srtt = 0, cwnd = 0, mtu = 0;
-    UINT32 want, have, delta, baseMs = 0, queueMs = 0;
+    UINT32 rwnd = 0, unacked = 0, srtt = 0, cwnd = 0, mtu = 0, baseMs, queueMs;
 
     if (pSctpSession == NULL) {
         return;
     }
 
     now = esp_timer_get_time();
-    if (now - pSctpSession->lastTuneUs < SCTP_SNDBUF_TUNE_INTERVAL_US) {
+    if (now - pSctpSession->lastReportUs < SCTP_SNDBUF_REPORT_INTERVAL_US) {
         return;
     }
-    pSctpSession->lastTuneUs = now;
+    pSctpSession->lastReportUs = now;
 
     if (STATUS_FAILED(sctpSessionGetStats(pSctpSession, &rwnd, &unacked, &srtt, &cwnd, &mtu)) || srtt == 0) {
         return;
@@ -376,47 +376,11 @@ static VOID sctpSessionTuneSendBuffer(PSctpSession pSctpSession)
         : pSctpSession->srttMinCurMs;
     queueMs = (srtt > baseMs) ? (srtt - baseMs) : 0;
 
-    want = (UINT32) (((UINT64) SCTP_SNDBUF_TARGET_BYTES_PER_SEC * (UINT64) srtt) / 1000);
-    if (want < SCTP_SNDBUF_MIN_BYTES) {
-        want = SCTP_SNDBUF_MIN_BYTES;
-    } else if (want > SCTP_SNDBUF_MAX_BYTES) {
-        want = SCTP_SNDBUF_MAX_BYTES;
-    }
-
-    /* A periodic line whether or not anything changed.
-     *
-     * Every other transport number in this file is printed from inside the
-     * drop warning, so the whole record is sampled at moments of failure and
-     * there is nothing to compare it against. That is why a link which spends
-     * minutes in a low frame rate and then recovers -- the behavior this
-     * camera has shown since mjpeg streaming first worked -- cannot be
-     * characterized: nobody has ever seen what the healthy half looks like.
-     *
-     * Everything here was already fetched a line above and discarded unless
-     * the buffer happened to need resizing. */
-    if (now - pSctpSession->lastReportUs >= SCTP_SNDBUF_REPORT_INTERVAL_US) {
-        pSctpSession->lastReportUs = now;
-        ESP_LOGI("sctp", "health: srtt %u ms (base %u, queue %u), cwnd %u, buf %u,"
-                 " inflight %u, rwnd %u",
-                 (unsigned) srtt, (unsigned) baseMs, (unsigned) queueMs,
-                 (unsigned) cwnd, (unsigned) pSctpSession->sndBufBytes,
-                 (unsigned) (unacked * (mtu != 0 ? mtu : SCTP_MTU)), (unsigned) rwnd);
-    }
-
-    have = pSctpSession->sndBufBytes;
-    delta = (want > have) ? (want - have) : (have - want);
-    if (delta < SCTP_SNDBUF_HYSTERESIS_BYTES) {
-        return;
-    }
-
-    if (STATUS_SUCCEEDED(sctpSessionSetSendBuffer(pSctpSession, (INT32) want))) {
-        ESP_LOGI("sctp", "send buffer %u -> %u bytes (srtt %u ms, base %u, queue %u ms, cwnd %u)",
-                 (unsigned) have, (unsigned) want, (unsigned) srtt,
-                 (unsigned) baseMs, (unsigned) queueMs, (unsigned) cwnd);
-    } else {
-        ESP_LOGW("sctp", "send buffer resize to %u bytes refused (srtt %u ms)",
-                 (unsigned) want, (unsigned) srtt);
-    }
+    ESP_LOGI("sctp", "health: srtt %u ms (base %u, queue %u), cwnd %u, buf %u,"
+             " inflight %u, rwnd %u",
+             (unsigned) srtt, (unsigned) baseMs, (unsigned) queueMs,
+             (unsigned) cwnd, (unsigned) pSctpSession->sndBufBytes,
+             (unsigned) (unacked * (mtu != 0 ? mtu : SCTP_MTU)), (unsigned) rwnd);
 }
 
 #ifdef SCTP_TCB_LOCK_TIMING
@@ -440,12 +404,30 @@ static struct {
      * or it is fiction. */
     UINT64 waitUsRx, waitUsTx;
     UINT32 hitsRx, hitsTx, worstUs;
+    /* How long the association is actually owned, as opposed to waited for.
+       Wait time says it is contended; hold time says by what. If the whole of
+       a DTLS encryption and socket write happens inside, the held total lands
+       near the packet rate times the measured 1.9 ms per outbound packet --
+       and if it does not, the contention is coming from somewhere else and
+       moving the encryption out would buy nothing. */
+    UINT64 heldUs;
+    UINT32 holds, worstHeldUs;
     int64_t window;
 } gLockStats;
+
+/* Set while the lock is held, read when it is released. One holder at a time
+   is the whole point of a mutex, so a single slot is sufficient and needs no
+   atomic. */
+static int64_t gLockHeldSince;
 
 VOID sctpTcbLockTimed(pthread_mutex_t *pMutex)
 {
     if (pthread_mutex_trylock(pMutex) == 0) {
+        /* Uncontended, and the common case -- but it still has to stamp the
+           hold, or every acquisition that did not have to wait would be
+           invisible to the hold accounting and the total would be a small
+           fraction of the truth. */
+        gLockHeldSince = esp_timer_get_time();
         return;
     }
 
@@ -466,6 +448,21 @@ VOID sctpTcbLockTimed(pthread_mutex_t *pMutex)
     if (waited > gLockStats.worstUs) {
         gLockStats.worstUs = waited;
     }
+    gLockHeldSince = esp_timer_get_time();
+}
+
+VOID sctpTcbUnlockTimed(pthread_mutex_t *pMutex)
+{
+    if (gLockHeldSince != 0) {
+        UINT32 held = (UINT32) (esp_timer_get_time() - gLockHeldSince);
+        gLockHeldSince = 0;
+        gLockStats.heldUs += held;
+        gLockStats.holds++;
+        if (held > gLockStats.worstHeldUs) {
+            gLockStats.worstHeldUs = held;
+        }
+    }
+    (VOID) pthread_mutex_unlock(pMutex);
 }
 
 static VOID sctpReportLockStats(VOID)
@@ -479,10 +476,14 @@ static VOID sctpReportLockStats(VOID)
         return;
     }
     double secs = (now - gLockStats.window) / 1e6;
-    ESP_LOGW("sctp", "assoc lock: contended rx %u (%.1f ms/s), tx %u (%.1f ms/s), worst %u us",
+    ESP_LOGW("sctp", "assoc lock: contended rx %u (%.1f ms/s), tx %u (%.1f ms/s), worst %u us"
+                     " | held %u times, %.1f ms/s, %.2f ms each, worst %u us",
              (unsigned) gLockStats.hitsRx, gLockStats.waitUsRx / 1000.0 / secs,
              (unsigned) gLockStats.hitsTx, gLockStats.waitUsTx / 1000.0 / secs,
-             (unsigned) gLockStats.worstUs);
+             (unsigned) gLockStats.worstUs,
+             (unsigned) gLockStats.holds, gLockStats.heldUs / 1000.0 / secs,
+             gLockStats.holds ? gLockStats.heldUs / 1000.0 / gLockStats.holds : 0.0,
+             (unsigned) gLockStats.worstHeldUs);
     MEMSET(&gLockStats, 0x00, SIZEOF(gLockStats));
     gLockStats.window = now;
 }
@@ -608,7 +609,7 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
      * Wait for space instead, bounded so a dead association cannot park the
      * caller forever. This is the equivalent of gating on bufferedAmount,
      * which is what the browser-side APIs expose and this one does not. */
-    sctpSessionTuneSendBuffer(pSctpSession);
+    sctpSessionReportHealth(pSctpSession);
 
     {
         INT32 sent;

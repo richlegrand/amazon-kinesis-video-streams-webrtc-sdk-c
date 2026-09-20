@@ -65,88 +65,56 @@
 #define SCTP_SESSION_SNDBUF_BYTES    (48 * 1024)
 #define SCTP_TIMER_THREAD_STACK_SIZE (8 * 1024)
 
-/* Sized from srtt, which is what the note above proposed.
- *
- * This is the configuration that was watched by eye and called notably
- * smoother than the fixed 48 KB it replaced: the buffer grows from the floor
- * to somewhere near 130 KB over the first half minute and the drops stop.
- *
- * Restored deliberately after several alternatives were tried and each was
- * worse -- see the note below, which records both what they were and why the
- * comparison between them is weaker than it looks. */
-#define SCTP_SNDBUF_TARGET_BYTES_PER_SEC (300 * 1024)
-#define SCTP_SNDBUF_MIN_BYTES            SCTP_SESSION_SNDBUF_BYTES
-#define SCTP_SNDBUF_MAX_BYTES            (160 * 1024)
-#define SCTP_SNDBUF_TUNE_INTERVAL_US     (1000 * 1000)
-/* How often transport health is printed regardless of anything changing.
-   Slow enough not to crowd the log over a long observation, fast enough to
-   resolve a swing that takes tens of seconds. */
-#define SCTP_SNDBUF_REPORT_INTERVAL_US   (10 * 1000 * 1000)
-#define SCTP_SNDBUF_HYSTERESIS_BYTES     (8 * 1024)
-/* Only used to report the standing queue, not to size anything. */
-#define SCTP_SRTT_MIN_WINDOW_US          (30 * 1000 * 1000)
-
-/* Why it is sized this way and not another, and what the alternatives cost.
- *
- * Taking this at face value is a mistake, and the reasoning behind it does
- * not fully survive contact.
+/* Fixed, after an afternoon of trying to size it from srtt and failing three
+ * distinct ways. Recorded because the idea is tempting and each failure was
+ * only obvious afterwards.
  *
  * The premise was that throughput equals buffer over srtt, so a full buffer
  * means the buffer is the constraint. That is Little's Law, and when the
  * buffer is full it holds whatever is actually limiting -- srtt simply grows
- * to absorb whatever is added. Grown from 49 to 134 KB, srtt went 188 to 438
- * and throughput moved 25%. A lifted ceiling would have moved throughput with
- * the buffer; that is what queueing looks like instead.
+ * to absorb whatever is added. Grown 49 to 134 KB, srtt went 188 to 438 and
+ * throughput moved 25%. A lifted ceiling moves throughput with the buffer;
+ * that is what queueing looks like instead.
  *
- * Sizing from srtt is also circular: a bigger buffer queues more, srtt rises,
- * and the formula reads its own queue as permission to grow again. Sizing
- * from the minimum srtt breaks the loop but not the problem -- the minimum is
- * only honest while nothing is queued, and on a saturated link it drifted from
- * 63 ms to 308 in 47 seconds, taking the buffer to its ceiling with it.
+ * Sizing from srtt is circular, because a bigger buffer queues more and the
+ * formula reads its own queue as permission to grow again. Sizing from the
+ * minimum srtt breaks that loop but not the problem: the minimum is only
+ * honest while nothing is queued, and on a saturated link it drifted 63 ms to
+ * 308 in 47 seconds, taking the buffer to its ceiling.
  *
- * The real numbers: baseline round trip near 70 ms, capacity near 300 KB/s,
- * so the bandwidth-delay product is about 21 KB. Even 48 KB was never capping
- * throughput. The camera offers more than the path carries and the transport
- * can only queue it or drop it, and no amount of arithmetic about the product
- * changes that.
+ * The third failure is the one that killed it. When the access point signal
+ * fell 8 dB, retransmit timeouts drove cwnd to a single MTU -- and srtt rose
+ * with them, so the tuner grew the buffer 65 KB to 115 KB while the window
+ * was 4,848 bytes, ending at 160 KB behind a 1,212 byte window with nothing
+ * in flight. A buffer larger than the window can drain does not hold frames,
+ * it delays them and then loses them. Frame rate went 19 to 7.7.
  *
- * What the buffer does decide is how long a congestion dip can last before
- * frames die: cwnd was measured collapsing to 9,630 from 43,100, and the
- * buffer is what holds frames until it recovers. Growing into that is what
- * this does, and it is the only arrangement so far that has been called
- * smooth by someone watching it.
+ * Refusing to grow while cwnd is small was tried and does not work either:
+ * the growth happens while the window is still healthy and the collapse comes
+ * after, so the rule loses the race. Worse, the extra data in flight on a
+ * lossy link plausibly helps cause the collapse it is reacting to.
  *
- * Four alternatives were tried in one afternoon and each was worse:
+ * What actually drives the long low-frame-rate stretches is the radio, not
+ * this number: rssi steady at -42 for 150 seconds at 18 fps, then -50, and
+ * the frame rate follows about 30 seconds later with frame size unchanged.
+ * No send buffer addresses that. The tuner was not solving the problem, it
+ * was adding a failure mode on top of it.
  *
- *   base srtt + 150 ms   65 KB fixed in practice, jittery, drops returned
- *   base srtt + 300 ms   111 KB, smooth, but the baseline drifted 63 to
- *                        308 ms in 47 s and took the buffer to its ceiling
- *   128 KB fixed         8 fps, 52 frames abandoned, long stalls
- *   48 KB fixed          9 fps, 26 abandoned
+ * So 48 KB stands on the sweeps above, which are the only measurements here
+ * taken against a path that was not moving underneath them. Anything that
+ * replaces it wants a controlled comparison, and the health line below is
+ * what would make one possible.
  *
- * The 128 KB result is the instructive one. With cwnd collapsed, a full
- * 128 KB is queued behind a window that cannot drain it -- about a second of
- * video, stale before it leaves, while every new frame waits the full 250 ms
- * and dies anyway. A buffer larger than the window can drain does not hold
- * frames, it delays them and then loses them. Growing into a dip works;
- * starting above it does not.
- *
- * One caution about that table, because it is easy to over-read. The path was
- * not held constant across those runs and cannot be: the bad ones show cwnd
- * dropping to one MTU and acks gapping several hundred milliseconds, which is
- * a retransmit timeout rather than anything this file chose. Treat it as four
- * observations, not a controlled sweep, and prefer changing one thing at a
- * time against the diagnostics below.
- *
- * Those diagnostics are the durable part. srtt, cwnd and the inbound gap cost
- * one getsockopt on a path that is already failing, and they separate a bad
- * minute on the network from a bad decision here -- which is the question
- * that went unanswered while four buffer sizes were tried against it.
- *
- * The real fix for the underlying mismatch is elsewhere in any case. The
- * camera offers more than the path carries and the transport can only queue
- * it or drop it; telling the camera to send less is the answer, and no buffer
- * size substitutes for it. */
+ * The real answer to a link that cannot carry what the camera offers is to
+ * offer less. That is rate adaptation, and it lives in the camera rather than
+ * here. */
+
+/* How often transport health is printed, regardless of anything changing.
+   Slow enough not to crowd a long observation, fast enough to resolve a swing
+   that takes tens of seconds. */
+#define SCTP_SNDBUF_REPORT_INTERVAL_US   (10 * 1000 * 1000)
+/* Only used to report the standing queue. */
+#define SCTP_SRTT_MIN_WINDOW_US          (30 * 1000 * 1000)
 
 #define SCTP_SEND_BUFFER_RETRY_MS    2
 
@@ -279,7 +247,7 @@ typedef struct {
     volatile INT64 lastInboundUs;
     /* The send buffer in force, and when it was last reconsidered. */
     UINT32 sndBufBytes;
-    INT64 lastTuneUs;
+
     INT64 lastReportUs;
     /* Smallest srtt seen recently, reported so the standing queue is visible
        as srtt minus this. Not used to size anything: the minimum is only
