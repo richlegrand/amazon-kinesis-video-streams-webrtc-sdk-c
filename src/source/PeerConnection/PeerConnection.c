@@ -1,5 +1,7 @@
 #define LOG_CLASS "PeerConnection"
 #include "esp_log.h"
+#include "kvs_instrumentation.h"
+#include "esp_timer.h"
 
 #include "../Include_i.h"
 #include "kvs_teardown_watch.h"
@@ -192,7 +194,17 @@ VOID onInboundPacket(UINT64 customData, PBYTE buff, UINT32 buffLen)
                   +----------------+
     */
     if (buff[0] > 19 && buff[0] < 64) {
+#if KVS_INSTR
+        /* The bracket in ConnectionListener calls everything from here on
+           "sctp", which hides that the DTLS decrypt is inside it. Six and a
+           half milliseconds a packet was attributed to usrsctp on that
+           basis; this says how much of it actually is. */
+        int64_t t_in0 = esp_timer_get_time();
+#endif
         dtlsSessionProcessPacket(pKvsPeerConnection->pDtlsSession, buff, &signedBuffLen);
+#if KVS_INSTR
+        int64_t t_in1 = esp_timer_get_time();
+#endif
 
         CHK_STATUS(dtlsSessionIsInitFinished(pKvsPeerConnection->pDtlsSession, &isDtlsConnected));
         if (isDtlsConnected) {
@@ -210,6 +222,26 @@ VOID onInboundPacket(UINT64 customData, PBYTE buff, UINT32 buffLen)
                 if (signedBuffLen > 0) {
                     CHK_STATUS(putSctpPacket(pKvsPeerConnection->pSctpSession, buff, signedBuffLen));
                 }
+#if KVS_INSTR
+                {
+                    static int64_t sumDtls, sumSctp, windowStart;
+                    static UINT32 inPackets;
+                    int64_t now = esp_timer_get_time();
+                    sumDtls += t_in1 - t_in0;
+                    sumSctp += now - t_in1;
+                    inPackets++;
+                    if (windowStart == 0) {
+                        windowStart = t_in0;
+                    } else if (now - windowStart > 5000000) {
+                        KVS_INSTR_LOGW("pc", "inbound split: %u packets, %.2f ms dtls decrypt + %.2f ms conninput",
+                                       (unsigned) inPackets, sumDtls / 1000.0 / inPackets,
+                                       sumSctp / 1000.0 / inPackets);
+                        sumDtls = sumSctp = 0;
+                        inPackets = 0;
+                        windowStart = now;
+                    }
+                }
+#endif
             }
 #endif
             changePeerConnectionState(pKvsPeerConnection, RTC_PEER_CONNECTION_STATE_CONNECTED);
