@@ -196,16 +196,15 @@ INT32 dtlsSessionSendCallback(PVOID customData, const unsigned char* pBuf, ULONG
     }
 #if KVS_INSTR
     {
-        static int64_t sumSend, windowStart;
-        static UINT32 packets;
+        /* Per session -- see the comment on these fields in Dtls.h. */
         int64_t t0 = esp_timer_get_time();
         pDtlsSession->dtlsSessionCallbacks.outboundPacketFn(pDtlsSession->dtlsSessionCallbacks.outBoundPacketFnCustomData, (PBYTE) pBuf, len);
         int64_t now = esp_timer_get_time();
-        sumSend += now - t0;
-        packets++;
-        if (windowStart == 0) {
-            windowStart = t0;
-        } else if (now - windowStart > 5000000) {
+        pDtlsSession->instrSumSend += now - t0;
+        pDtlsSession->instrSendPackets++;
+        if (pDtlsSession->instrSendWindowStart == 0) {
+            pDtlsSession->instrSendWindowStart = t0;
+        } else if (now - pDtlsSession->instrSendWindowStart > 5000000) {
             /* The WiFi driver refusing for want of a TX buffer, reported here
              * because it lands inside the send this line is timing -- and
              * because a 50 ms sleep with no accounting is how it stayed
@@ -214,13 +213,14 @@ INT32 dtlsSessionSendCallback(PVOID customData, const unsigned char* pBuf, ULONG
             UINT32 noBufUs = gSocketSendNoBufUs;
             KVS_INSTR_LOGW("dtls", "  of which outbound send: %.2f ms each over %u packets"
                                    " | tx-nobuf %u stalls, %u ms total",
-                           sumSend / 1000.0 / packets, (unsigned) packets,
+                           pDtlsSession->instrSumSend / 1000.0 / pDtlsSession->instrSendPackets,
+                           (unsigned) pDtlsSession->instrSendPackets,
                            (unsigned) noBufN, (unsigned) (noBufUs / 1000));
             gSocketSendNoBufCount -= noBufN;
             gSocketSendNoBufUs -= noBufUs;
-            sumSend = 0;
-            packets = 0;
-            windowStart = now;
+            pDtlsSession->instrSumSend = 0;
+            pDtlsSession->instrSendPackets = 0;
+            pDtlsSession->instrSendWindowStart = now;
         }
     }
 #else
@@ -609,23 +609,26 @@ STATUS dtlsSessionPutApplicationData(PDtlsSession pDtlsSession, PBYTE pData, INT
 #if KVS_INSTR
     {
         /* Accumulated and reported every few seconds; logging per packet would
-         * cost more than the thing being measured. */
-        static int64_t sumLock, sumWrite, sumTotal, windowStart;
-        static UINT32 packets;
+         * cost more than the thing being measured. Per session -- see the
+         * comment on these fields in Dtls.h. */
         int64_t now = esp_timer_get_time();
-        sumLock += t_locked - t_enter;
-        sumWrite += dtlsWriteUs;
-        sumTotal += now - t_enter;
-        packets++;
-        if (windowStart == 0) {
-            windowStart = t_enter;
-        } else if (now - windowStart > 5000000) {
+        pDtlsSession->instrSumLock += t_locked - t_enter;
+        pDtlsSession->instrSumWrite += dtlsWriteUs;
+        pDtlsSession->instrSumTotal += now - t_enter;
+        pDtlsSession->instrPackets++;
+        if (pDtlsSession->instrWindowStart == 0) {
+            pDtlsSession->instrWindowStart = t_enter;
+        } else if (now - pDtlsSession->instrWindowStart > 5000000) {
+            UINT32 n = pDtlsSession->instrPackets;
+            INT64 total = pDtlsSession->instrSumTotal;
+            INT64 lock = pDtlsSession->instrSumLock;
+            INT64 write = pDtlsSession->instrSumWrite;
             KVS_INSTR_LOGW("dtls", "%u packets: %.2f ms each = %.2f lock + %.2f ssl_write + %.2f other",
-                           (unsigned) packets, sumTotal / 1000.0 / packets, sumLock / 1000.0 / packets,
-                           sumWrite / 1000.0 / packets, (sumTotal - sumLock - sumWrite) / 1000.0 / packets);
-            sumLock = sumWrite = sumTotal = 0;
-            packets = 0;
-            windowStart = now;
+                           (unsigned) n, total / 1000.0 / n, lock / 1000.0 / n,
+                           write / 1000.0 / n, (total - lock - write) / 1000.0 / n);
+            pDtlsSession->instrSumLock = pDtlsSession->instrSumWrite = pDtlsSession->instrSumTotal = 0;
+            pDtlsSession->instrPackets = 0;
+            pDtlsSession->instrWindowStart = now;
         }
     }
 #endif

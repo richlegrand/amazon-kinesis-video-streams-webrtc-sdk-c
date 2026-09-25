@@ -119,6 +119,28 @@ struct __DtlsSession {
     DTLS_HANDSHAKE_STATE handshakeState;
     MUTEX sslLock;
 
+    /* Transport instrumentation windows, per session rather than file-scope
+     * statics.
+     *
+     * As statics they were shared by every session, so two peers meant two
+     * dtlsOut tasks incrementing the same 64-bit counters at once. A 64-bit
+     * += is two instructions on a 32-bit core, and an interleaved write
+     * leaves a garbage high word -- which is how a five second window came to
+     * report 3498 ms per packet, and why the same line printed twice. It
+     * happened only with two peers, which was exactly when the numbers
+     * mattered.
+     *
+     * Per session they also say more: one association starving while another
+     * runs freely is worth seeing, and the shared version could not show it.
+     * Each is touched only by its own dtlsOut task.
+     *
+     * Unconditional rather than behind the instrumentation flag, because a
+     * struct whose layout depends on a macro is a worse bug than a few unused
+     * words per session if some translation unit does not see it. */
+    INT64 instrSumLock, instrSumWrite, instrSumTotal, instrWindowStart;
+    INT64 instrSumSend, instrSendWindowStart;
+    UINT32 instrPackets, instrSendPackets;
+
 #ifdef KVS_USE_OPENSSL
     volatile ATOMIC_BOOL sslInitFinished;
     volatile SIZE_T objRefCount;
