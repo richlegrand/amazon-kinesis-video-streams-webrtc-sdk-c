@@ -3,6 +3,22 @@
  */
 #define LOG_CLASS "SocketConnection"
 #include "../Include_i.h"
+#include "esp_timer.h"
+
+/* Sends the driver refused for want of a buffer, and what that cost.
+ *
+ * The ENOMEM retry below sleeps 50 ms, then 100, then 150, and says nothing.
+ * That silence hid a bad case for a long time: two peers exhaust the WiFi TX
+ * buffers, a dtlsOut task stalls here, its association's send buffer stops
+ * draining, and an audio frame waits 100 ms for room it normally gets in 6.
+ * What finally exposed it was SCTP's congestion window sitting at 4 * MTU --
+ * the floor it only reaches after loss -- while no layer reported losing
+ * anything.
+ *
+ * Global rather than per-socket deliberately: the question is whether the
+ * device is out of TX buffers, not which peer noticed first. */
+volatile UINT32 gSocketSendNoBufCount;
+volatile UINT32 gSocketSendNoBufUs;
 
 STATUS createSocketConnection(KVS_IP_FAMILY_TYPE familyType, KVS_SOCKET_PROTOCOL protocol, PKvsIpAddress pBindAddr, PKvsIpAddress pPeerIpAddr,
                               UINT64 customData, ConnectionDataAvailableFunc dataAvailableFn, UINT32 sendBufSize,
@@ -417,7 +433,12 @@ STATUS socketSendDataWithRetry(PSocketConnection pSocketConnection, PBYTE buf, U
                 }
             } else if (errorNum == EINTR || errorNum == ENOMEM || errno == ENOBUFS) {
                 /* nothing need to be done, just retry */
+                INT64 noBufT0 = esp_timer_get_time();
                 THREAD_SLEEP(50 * HUNDREDS_OF_NANOS_IN_A_MILLISECOND * (socketWriteAttempt + 1));
+                /* Counted around the sleep rather than at entry, so the number
+                 * is the stall this cost and not merely that it happened. */
+                gSocketSendNoBufUs += (UINT32) (esp_timer_get_time() - noBufT0);
+                gSocketSendNoBufCount++;
             } else {
                 /* fatal error from send() */
                 DLOGE("sendto() socket %d failed with errno %s(%d)", pSocketConnection->localSocket, getErrorString(errorNum), errorNum);

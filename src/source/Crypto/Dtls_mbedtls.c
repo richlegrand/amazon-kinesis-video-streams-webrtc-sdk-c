@@ -15,7 +15,37 @@
  * fewer, fuller packets is the lever. */
 #define DTLS_MTU_SIZE_BYTES 1440
 
+/* Record ciphers in the order we want them, because the default order is
+ * expensive on this hardware and nothing else expresses a preference.
+ *
+ * mbedtls ranks roughly by key size, so its default lands on
+ * AES-256-CBC-SHA -- 14 AES rounds where 10 would do. Chrome offers
+ * AES-128-GCM and would never choose AES-256-CBC itself.
+ *
+ * AES-128-CBC-SHA first: the same code path as what was being negotiated,
+ * with hardware AES and hardware SHA-1, and 29% less AES work per packet.
+ * That matters because the encrypt path is the throughput ceiling here --
+ * about 3.7 ms per packet, which is 89% of a core at one viewer and all of
+ * it at two.
+ *
+ * GCM second rather than first: this chip has no SOC_AES_SUPPORT_GCM, so a
+ * GCM suite means single-block AES plus GHASH in software. It stays on the
+ * list only so a peer that refuses CBC can still connect.
+ *
+ * A list rather than one suite, so pinning a preference cannot turn into a
+ * handshake failure against a browser that disagrees. */
+static const int DTLS_CIPHERSUITES[] = {
+    MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+    MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+    MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+    0,
+};
+
 /**  https://tools.ietf.org/html/rfc5764#section-4.1.2 */
+/* Counted in SocketConnection.c, reported here. See the comment there. */
+extern volatile UINT32 gSocketSendNoBufCount;
+extern volatile UINT32 gSocketSendNoBufUs;
+
 mbedtls_ssl_srtp_profile DTLS_SRTP_SUPPORTED_PROFILES[] = {
     MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_80,
     MBEDTLS_TLS_SRTP_AES128_CM_HMAC_SHA1_32,
@@ -176,8 +206,18 @@ INT32 dtlsSessionSendCallback(PVOID customData, const unsigned char* pBuf, ULONG
         if (windowStart == 0) {
             windowStart = t0;
         } else if (now - windowStart > 5000000) {
-            KVS_INSTR_LOGW("dtls", "  of which outbound send: %.2f ms each over %u packets",
-                           sumSend / 1000.0 / packets, (unsigned) packets);
+            /* The WiFi driver refusing for want of a TX buffer, reported here
+             * because it lands inside the send this line is timing -- and
+             * because a 50 ms sleep with no accounting is how it stayed
+             * invisible. See gSocketSendNoBufCount in SocketConnection.c. */
+            UINT32 noBufN = gSocketSendNoBufCount;
+            UINT32 noBufUs = gSocketSendNoBufUs;
+            KVS_INSTR_LOGW("dtls", "  of which outbound send: %.2f ms each over %u packets"
+                                   " | tx-nobuf %u stalls, %u ms total",
+                           sumSend / 1000.0 / packets, (unsigned) packets,
+                           (unsigned) noBufN, (unsigned) (noBufUs / 1000));
+            gSocketSendNoBufCount -= noBufN;
+            gSocketSendNoBufUs -= noBufUs;
             sumSend = 0;
             packets = 0;
             windowStart = now;
@@ -273,6 +313,17 @@ STATUS dtlsTransmissionTimerCallback(UINT32 timerID, UINT64 currentTime, UINT64 
     switch (handshakeStatus) {
         case 0:
             // success.
+            /* What was negotiated, which nothing else records and which sets
+             * the per-packet encrypt cost. Neither end pins a suite -- KVS
+             * never calls mbedtls_ssl_conf_ciphersuites, so the browser's
+             * preference decides -- and on a chip without SOC_AES_SUPPORT_GCM
+             * a GCM suite means single-block AES plus software GHASH, while a
+             * CBC suite would use DMA-accelerated AES and hardware SHA. That
+             * difference is worth one line at handshake.
+             *
+             * ESP_LOGW, not DLOGI: the KVS logger's level comes from
+             * app_webrtc's config and swallows DLOGI entirely. */
+            ESP_LOGW("dtls", "negotiated %s", mbedtls_ssl_get_ciphersuite(&pDtlsSession->sslCtx));
             CHK_STATUS(dtlsSessionChangeState(pDtlsSession, RTC_DTLS_TRANSPORT_STATE_CONNECTED));
             CHK(FALSE, STATUS_TIMER_QUEUE_STOP_SCHEDULING);
             break;
@@ -380,6 +431,9 @@ STATUS dtlsSessionStart(PDtlsSession pDtlsSession, BOOL isServer)
         STATUS_CREATE_SSL_FAILED);
     // no need to verify since the certificate will be verified through SDP later
     mbedtls_ssl_conf_authmode(&pDtlsSession->sslCtxConfig, MBEDTLS_SSL_VERIFY_OPTIONAL);
+    /* Ours whichever role we take: as server it decides, as client it is what
+     * we offer. See DTLS_CIPHERSUITES. */
+    mbedtls_ssl_conf_ciphersuites(&pDtlsSession->sslCtxConfig, DTLS_CIPHERSUITES);
     mbedtls_ssl_conf_rng(&pDtlsSession->sslCtxConfig, mbedtls_ctr_drbg_random, &pDtlsSession->ctrDrbg);
 
     for (i = 0; i < pDtlsSession->certificateCount; i++) {
