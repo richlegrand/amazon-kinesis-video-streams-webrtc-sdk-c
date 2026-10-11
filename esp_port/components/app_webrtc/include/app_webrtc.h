@@ -361,6 +361,27 @@ const char *app_webrtc_data_channel_label(void *pDataChannel);
  */
 WEBRTC_STATUS app_webrtc_set_send_buffer(void *pDataChannel, int bytes);
 
+/* The association under a peer's channel, as a sender of whole frames needs
+ * it to pace itself -- what bufferedAmount is in a browser, and a little
+ * more. */
+typedef struct {
+    uint32_t buffered;   /* bytes in the send buffer: unsent and unacknowledged */
+    uint32_t sndbuf;     /* the send buffer's size */
+    uint32_t peer_rwnd;  /* what the peer will take; near zero when it has
+                            stopped reading */
+    uint32_t quiet_ms;   /* since the peer last sent anything, acks included */
+} app_webrtc_link_t;
+
+/**
+ * @brief Read the link under @p pDataChannel, the channel of @p peer_id.
+ *
+ * By peer, as app_webrtc_send_data_channel_message is, and guarded the same
+ * way, so a session being torn down is not read after it is freed.
+ * WEBRTC_STATUS_INVALID_ARG when the peer has no session.
+ */
+WEBRTC_STATUS app_webrtc_get_link(const char *peer_id, void *pDataChannel,
+                                  app_webrtc_link_t *out);
+
 /**
  * @brief Create a data channel on the active peer session for @p peer_id.
  *

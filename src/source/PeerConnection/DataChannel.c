@@ -54,6 +54,18 @@ CleanUp:
     return retStatus;
 }
 
+STATUS dataChannelGetLink(PRtcDataChannel pRtcDataChannel, PUINT32 pBuffered, PUINT32 pSndBuf,
+                          PUINT32 pRwnd, PUINT32 pQuietMs)
+{
+    STATUS retStatus = STATUS_SUCCESS;
+    PKvsDataChannel pKvsDataChannel = (PKvsDataChannel) pRtcDataChannel;
+    CHK(pKvsDataChannel != NULL, STATUS_NULL_ARG);
+    CHK_STATUS(sctpSessionGetLink(((PKvsPeerConnection) pKvsDataChannel->pRtcPeerConnection)->pSctpSession,
+                                  pBuffered, pSndBuf, pRwnd, pQuietMs));
+CleanUp:
+    return retStatus;
+}
+
 STATUS dataChannelSetSendBuffer(PRtcDataChannel pRtcDataChannel, INT32 bytes)
 {
     STATUS retStatus = STATUS_SUCCESS;

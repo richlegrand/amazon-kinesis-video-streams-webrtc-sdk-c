@@ -272,6 +272,7 @@ STATUS createSctpSession(PSctpSessionCallbacks, PSctpSession*);
 STATUS freeSctpSession(PSctpSession*);
 STATUS putSctpPacket(PSctpSession, PBYTE, UINT32);
 STATUS sctpSessionGetStats(PSctpSession, PUINT32, PUINT32, PUINT32, PUINT32, PUINT32);
+STATUS sctpSessionGetLink(PSctpSession, PUINT32, PUINT32, PUINT32, PUINT32);
 STATUS sctpSessionWriteMessage(PSctpSession, UINT32, BOOL, PBYTE, UINT32, PRtcDataChannelInit);
 STATUS sctpSessionSetSendBuffer(PSctpSession, INT32);
 STATUS sctpSessionWriteDcep(PSctpSession, UINT32, PCHAR, UINT32, PRtcDataChannelInit);

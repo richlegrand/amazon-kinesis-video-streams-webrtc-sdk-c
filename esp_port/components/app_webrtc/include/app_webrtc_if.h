@@ -371,6 +371,11 @@ typedef struct {
      * value depends on message size and on the link. */
     WEBRTC_STATUS (*set_send_buffer)(void *pDataChannel, int bytes);
 
+    /* The association under a channel, for a sender pacing itself
+     * (app_webrtc_get_link). */
+    WEBRTC_STATUS (*get_link)(void *pDataChannel, uint32_t *buffered, uint32_t *sndbuf,
+                              uint32_t *peer_rwnd, uint32_t *quiet_ms);
+
     WEBRTC_STATUS (*create_data_channel)(void *pSession,
                                         const char *channelName,
                                         const app_webrtc_data_channel_init_t *pInit,

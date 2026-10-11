@@ -1527,6 +1527,17 @@ static WEBRTC_STATUS kvs_pc_set_send_buffer(void *pDataChannel, int bytes)
                ? WEBRTC_STATUS_SUCCESS : WEBRTC_STATUS_INVALID_OPERATION;
 }
 
+static WEBRTC_STATUS kvs_pc_get_link(void *pDataChannel, uint32_t *buffered, uint32_t *sndbuf,
+                                     uint32_t *peer_rwnd, uint32_t *quiet_ms)
+{
+    if (pDataChannel == NULL) {
+        return WEBRTC_STATUS_NULL_ARG;
+    }
+    return (dataChannelGetLink((PRtcDataChannel) pDataChannel, buffered, sndbuf, peer_rwnd,
+                               quiet_ms) == STATUS_SUCCESS)
+               ? WEBRTC_STATUS_SUCCESS : WEBRTC_STATUS_INVALID_OPERATION;
+}
+
 static const char *kvs_pc_get_data_channel_label(void *pDataChannel)
 {
     return (pDataChannel != NULL) ? ((PRtcDataChannel) pDataChannel)->name : NULL;
@@ -1735,6 +1746,7 @@ webrtc_peer_connection_if_t* kvs_peer_connection_if_get(void)
         .create_data_channel = kvs_pc_create_data_channel,
         .get_data_channel_label = kvs_pc_get_data_channel_label,
         .set_send_buffer = kvs_pc_set_send_buffer,
+        .get_link = kvs_pc_get_link,
         .set_data_channel_callbacks = kvs_pc_set_data_channel_callbacks,
         .send_data_channel_message = kvs_pc_send_data_channel_message,
     };

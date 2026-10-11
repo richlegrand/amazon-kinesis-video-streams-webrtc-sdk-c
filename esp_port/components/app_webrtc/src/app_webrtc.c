@@ -2959,6 +2959,50 @@ WEBRTC_STATUS app_webrtc_set_send_buffer(void *pDataChannel, int bytes)
     return gWebRtcAppConfig.peer_connection_if->set_send_buffer(pDataChannel, bytes);
 }
 
+WEBRTC_STATUS app_webrtc_get_link(const char *peer_id, void *pDataChannel, app_webrtc_link_t *out)
+{
+    PAppWebRTCSession session = NULL;
+    int inflight = -1;
+
+    if (peer_id == NULL || pDataChannel == NULL || out == NULL) {
+        return WEBRTC_STATUS_NULL_ARG;
+    }
+    if (gSampleConfiguration == NULL || gWebRtcAppConfig.peer_connection_if == NULL ||
+        gWebRtcAppConfig.peer_connection_if->get_link == NULL) {
+        return WEBRTC_STATUS_NOT_IMPLEMENTED;
+    }
+
+    /* Found and marked in use under the list lock, as a send is: the channel
+     * belongs to the session, and a teardown frees both. */
+    MUTEX_LOCK(gSampleConfiguration->streamingSessionListReadLock);
+    for (UINT32 i = 0; i < gSampleConfiguration->streamingSessionCount; ++i) {
+        if (gSampleConfiguration->webrtcSessionList[i] != NULL &&
+            STRCMP(gSampleConfiguration->webrtcSessionList[i]->peerId, peer_id) == 0) {
+            session = gSampleConfiguration->webrtcSessionList[i];
+            break;
+        }
+    }
+    if (session != NULL) {
+        if (ATOMIC_LOAD_BOOL(&session->terminateFlag)) {
+            session = NULL;
+        } else {
+            inflight = inflight_enter(session);
+        }
+    }
+    MUTEX_UNLOCK(gSampleConfiguration->streamingSessionListReadLock);
+
+    if (session == NULL) {
+        return WEBRTC_STATUS_INVALID_ARG;
+    }
+    if (inflight < 0) {
+        return WEBRTC_STATUS_INVALID_OPERATION;     /* every slot busy; try later */
+    }
+    WEBRTC_STATUS st = gWebRtcAppConfig.peer_connection_if->get_link(
+        pDataChannel, &out->buffered, &out->sndbuf, &out->peer_rwnd, &out->quiet_ms);
+    inflight_exit(inflight);
+    return st;
+}
+
 const char *app_webrtc_data_channel_label(void *pDataChannel)
 {
     if (gWebRtcAppConfig.peer_connection_if == NULL ||

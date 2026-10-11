@@ -314,6 +314,58 @@ CleanUp:
     return retStatus;
 }
 
+/* What a sender needs to pace itself, the way bufferedAmount does in a
+ * browser: how much of the send buffer is in use, how big it is, how much the
+ * peer will take, and how long since it last said anything.
+ *
+ * Buffered is everything the association holds for sending, unsent and
+ * unacknowledged together -- what counts against SO_SNDBUF. A producer of
+ * whole frames checks it before starting one, so it does not start a frame
+ * the buffer has no room to finish.
+ *
+ * Quiet is the other half of telling a slow viewer from a gone one. A viewer
+ * still in slow start acknowledges steadily while no whole frame gets through;
+ * one that has gone says nothing at all. */
+#ifndef SCTP_GET_SNDBUF_USE
+/* The stack has it (netinet/sctp.h, netinet/sctp_uio.h) and usrsctp.h, the
+ * header a user of the library gets, leaves it out. Same value and layout. */
+#define SCTP_GET_SNDBUF_USE 0x00001101
+struct sctp_sockstat {
+    sctp_assoc_t ss_assoc_id;
+    uint32_t ss_total_sndbuf;
+    uint32_t ss_total_recv_buf;
+};
+#endif
+
+STATUS sctpSessionGetLink(PSctpSession pSctpSession, PUINT32 pBuffered, PUINT32 pSndBuf,
+                          PUINT32 pRwnd, PUINT32 pQuietMs)
+{
+    STATUS retStatus = STATUS_SUCCESS;
+    struct sctp_sockstat ss;
+    struct sctp_status status;
+    socklen_t len;
+
+    CHK(pSctpSession != NULL && pBuffered != NULL && pSndBuf != NULL && pRwnd != NULL &&
+            pQuietMs != NULL, STATUS_NULL_ARG);
+
+    MEMSET(&ss, 0, SIZEOF(ss));
+    len = SIZEOF(ss);
+    CHK(usrsctp_getsockopt(pSctpSession->socket, IPPROTO_SCTP, SCTP_GET_SNDBUF_USE, &ss, &len) == 0,
+        STATUS_INTERNAL_ERROR);
+    MEMSET(&status, 0, SIZEOF(status));
+    len = SIZEOF(status);
+    CHK(usrsctp_getsockopt(pSctpSession->socket, IPPROTO_SCTP, SCTP_STATUS, &status, &len) == 0,
+        STATUS_INTERNAL_ERROR);
+
+    *pBuffered = ss.ss_total_sndbuf;
+    *pSndBuf = pSctpSession->sndBufBytes;
+    *pRwnd = status.sstat_rwnd;
+    *pQuietMs = (UINT32) ((esp_timer_get_time() - pSctpSession->lastInboundUs) / 1000);
+
+CleanUp:
+    return retStatus;
+}
+
 /* Resize the send buffer on a live association.
  *
  * This is the throttle, and its right value depends on message size and on the
