@@ -615,9 +615,18 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
         INT32 sent;
         UINT32 waitedMs = 0;
         /* Derived from the channel, not fixed: see SCTP_SEND_BUFFER_MAX_WAIT_MS. */
-        UINT32 maxWaitMs = (pRtcDataChannelInit != NULL && !pRtcDataChannelInit->ordered)
-            ? SCTP_SEND_BUFFER_MAX_WAIT_UNORDERED_MS
-            : SCTP_SEND_BUFFER_MAX_WAIT_MS;
+        BOOL unordered = (pRtcDataChannelInit != NULL && !pRtcDataChannelInit->ordered);
+        UINT32 maxWaitMs = unordered ? SCTP_SEND_BUFFER_MAX_WAIT_UNORDERED_MS
+                                     : SCTP_SEND_BUFFER_MAX_WAIT_MS;
+        /* waitedMs adds up the sleeps it asked for, and each pass costs more
+         * than that -- the send attempt, and a task at its priority waiting to
+         * run again. Measured, "5000 ms" on the ordered channel was 17.5 s.
+         * A teardown now waits for a send that is stuck here (app_webrtc's
+         * inflight_drain), so the ordered limit is held to the clock and
+         * says what it means -- see SCTP_SEND_BUFFER_MAX_WAIT_MS for why it
+         * is 15 s. The unordered one keeps counting: it is video's, and its
+         * effective wait is what video has been tuned against. */
+        INT64 startUs = esp_timer_get_time();
         for (;;) {
             sent = usrsctp_sendv(pSctpSession->socket, pMessage, pMessageLen, NULL, 0, &spa,
                                  SIZEOF(spa), SCTP_SENDV_SPA, 0);
@@ -626,6 +635,9 @@ STATUS sctpSessionWriteMessage(PSctpSession pSctpSession, UINT32 streamId, BOOL 
             }
             if (errno != EWOULDBLOCK && errno != EAGAIN) {
                 break;
+            }
+            if (!unordered) {
+                waitedMs = (UINT32) ((esp_timer_get_time() - startUs) / 1000);
             }
             if (waitedMs >= maxWaitMs) {
                 UINT32 rwnd = 0, unacked = 0, srtt = 0, cwnd = 0, mtu = 0;

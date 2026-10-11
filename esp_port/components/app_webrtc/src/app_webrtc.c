@@ -19,6 +19,9 @@
 
 #include "sdkconfig.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "app_webrtc";
 
@@ -518,6 +521,111 @@ CleanUp:
     return retStatus;
 }
 
+/*
+ * Sends in flight: which session, which task, since when. A session is not
+ * freed while one of its sends is still running.
+ *
+ * app_webrtc_send_data_channel_message finds a session under
+ * streamingSessionListReadLock, drops the lock, and sends through it. The
+ * monitor removes a session from the list and frees it, on the reasoning that
+ * nothing else can reach it -- which a send that found it a moment earlier
+ * still can. A send waiting seconds for SCTP buffer space on a network that has
+ * gone is exactly the window. Seen: an interrupt watchdog in usrsctp_sendv
+ * from bb_send, on a mutex in memory freeSctpSession had just released. Then
+ * measured with this table reporting only: every teardown on a network drop
+ * freed a session under a send, video's or bb_send's, one of them 3980 ms in.
+ * Most did not crash, because the memory had not been reused yet.
+ *
+ * A table beside the sessions rather than a count inside them, so that nothing
+ * here touches a session that might already be freed: a slot holds the pointer
+ * only as a key. Sized for every task that sends at once -- bb_send, video,
+ * audio -- with room over; one sender sends to its peers in turn.
+ */
+#define INFLIGHT_MAX 8
+
+/* How long a teardown waits for sends before freeing anyway. Over the ordered
+ * channel's SCTP wait (SCTP_SEND_BUFFER_MAX_WAIT_MS, 15 s), which is the
+ * longest a send can hold on, so reaching it means a send is stuck somewhere
+ * else -- worth a line in the log, and not worth a teardown that never ends.
+ *
+ * Long, and knowingly: a teardown that catches a settings frame mid-wait can
+ * take most of it (4.5 s was the longest seen). The cure is for that wait to
+ * end when its session starts closing, which needs a flag carried down to the
+ * SCTP session; not done yet. */
+#define INFLIGHT_DRAIN_MS 16000
+static struct {
+    PAppWebRTCSession session;
+    const char *task;
+    int64_t t0_us;
+} s_inflight[INFLIGHT_MAX];
+static portMUX_TYPE s_inflight_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static int inflight_enter(PAppWebRTCSession session)
+{
+    int slot = -1;
+    taskENTER_CRITICAL(&s_inflight_mux);
+    for (int i = 0; i < INFLIGHT_MAX; i++) {
+        if (s_inflight[i].session == NULL) {
+            s_inflight[i].session = session;
+            s_inflight[i].task = pcTaskGetName(NULL);
+            s_inflight[i].t0_us = esp_timer_get_time();
+            slot = i;
+            break;
+        }
+    }
+    taskEXIT_CRITICAL(&s_inflight_mux);
+    return slot;
+}
+
+static void inflight_exit(int slot)
+{
+    if (slot < 0) {
+        return;
+    }
+    taskENTER_CRITICAL(&s_inflight_mux);
+    s_inflight[slot].session = NULL;
+    taskEXIT_CRITICAL(&s_inflight_mux);
+}
+
+static int inflight_count(PAppWebRTCSession session, const char **task)
+{
+    int n = 0;
+    taskENTER_CRITICAL(&s_inflight_mux);
+    for (int i = 0; i < INFLIGHT_MAX; i++) {
+        if (s_inflight[i].session == session) {
+            if (task != NULL) *task = s_inflight[i].task;
+            n++;
+        }
+    }
+    taskEXIT_CRITICAL(&s_inflight_mux);
+    return n;
+}
+
+/* Wait for the session's sends to finish before it is freed.
+ *
+ * No new one can start: the session is out of webrtcSessionList and has
+ * terminateFlag set, and a send checks both under the list lock before it
+ * enters the table. So this only waits out the ones already running -- on a
+ * network that has gone, the ordered channel's wait for SCTP buffer space. */
+static void inflight_drain(PAppWebRTCSession session, const char *peer_id)
+{
+    const char *task = NULL;
+    int64_t t0 = esp_timer_get_time();
+    if (inflight_count(session, NULL) == 0) {
+        return;
+    }
+    while (inflight_count(session, &task) > 0) {
+        if (esp_timer_get_time() - t0 >= (int64_t) INFLIGHT_DRAIN_MS * 1000) {
+            ESP_LOGW(TAG, "teardown of %s: a send by %s still running after %d ms; "
+                          "freeing anyway", peer_id, task ? task : "?", INFLIGHT_DRAIN_MS);
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    ESP_LOGI(TAG, "teardown of %s waited %lld ms for sends", peer_id,
+             (long long) ((esp_timer_get_time() - t0) / 1000));
+}
+
 STATUS freeAppWebRTCSession(PAppWebRTCSession* ppAppWebRTCSession)
 {
     STATUS retStatus = STATUS_SUCCESS;
@@ -532,6 +640,7 @@ STATUS freeAppWebRTCSession(PAppWebRTCSession* ppAppWebRTCSession)
     DLOGD("Freeing WebRTC session with peer id: %s ", pAppWebRTCSession->peerId);
 
     ATOMIC_STORE_BOOL(&pAppWebRTCSession->terminateFlag, TRUE);
+    inflight_drain(pAppWebRTCSession, pAppWebRTCSession->peerId);
 
     if (pAppWebRTCSession->shutdownCallback != NULL) {
         pAppWebRTCSession->shutdownCallback(pAppWebRTCSession->shutdownCallbackCustomData, pAppWebRTCSession);
@@ -2930,6 +3039,7 @@ WEBRTC_STATUS app_webrtc_send_data_channel_message(const char *peer_id,
     WEBRTC_STATUS retStatus = WEBRTC_STATUS_SUCCESS;
     PAppWebRTCSession pStreamingSession = NULL;
     UINT32 i;
+    int inflight = -1;
 
     CHK(peer_id != NULL && pMessage != NULL && messageLen > 0, STATUS_NULL_ARG);
     CHK(gSampleConfiguration != NULL, STATUS_INVALID_OPERATION);
@@ -2942,6 +3052,28 @@ WEBRTC_STATUS app_webrtc_send_data_channel_message(const char *peer_id,
             pStreamingSession = gSampleConfiguration->webrtcSessionList[i];
             ESP_LOGD(TAG, "Found streaming session for peer: %s at index %" PRIu32, peer_id, i);
             break;
+        }
+    }
+    /* Under the lock, so a session cannot leave the list between being found
+     * and being marked as in use -- and not at all once it is terminating, so
+     * a teardown waiting on the table cannot have new sends join it. One that
+     * is terminating is answered as if already gone. */
+    if (pStreamingSession != NULL) {
+        if (ATOMIC_LOAD_BOOL(&pStreamingSession->terminateFlag)) {
+            pStreamingSession = NULL;
+        } else {
+            inflight = inflight_enter(pStreamingSession);
+            if (inflight < 0) {
+                /* Every slot taken means more senders than INFLIGHT_MAX allows
+                 * for. Refused rather than sent unguarded. */
+                static bool said;
+                if (!said) {
+                    said = true;
+                    ESP_LOGE(TAG, "more than %d sends at once; refusing", INFLIGHT_MAX);
+                }
+                MUTEX_UNLOCK(gSampleConfiguration->streamingSessionListReadLock);
+                CHK(FALSE, STATUS_INVALID_OPERATION);
+            }
         }
     }
     MUTEX_UNLOCK(gSampleConfiguration->streamingSessionListReadLock);
@@ -2980,6 +3112,7 @@ WEBRTC_STATUS app_webrtc_send_data_channel_message(const char *peer_id,
     );
 
 CleanUp:
+    inflight_exit(inflight);
     if (STATUS_FAILED(retStatus)) {
         ESP_LOGE(TAG, "Failed to send data channel message: 0x%08" PRIx32, (UINT32) retStatus);
     }

@@ -131,8 +131,15 @@
  * incoherent: it neither delivers anything useful nor lets the next frame
  * through. It also blocks every other viewer, since one sender fans a frame
  * out to all of them in turn -- a phone that stopped reading held a second
- * browser at one frame per five seconds for half a minute. */
-#define SCTP_SEND_BUFFER_MAX_WAIT_MS           5000
+ * browser at one frame per five seconds for half a minute.
+ *
+ * The ordered limit is measured against the clock (sctpSessionWriteMessage).
+ * It was 5000 counted as the sum of 2 ms sleeps, which took about 17 s in
+ * practice -- and that was what kept a stall of a few seconds from costing
+ * anything. Held to a real 5 s, a 4-5 s stall in which the browser
+ * acknowledged nothing dropped a 124-byte frame from the middle of an HTTP
+ * reply (2026-10-10). 15 s is the honest version of what it was. */
+#define SCTP_SEND_BUFFER_MAX_WAIT_MS           15000
 #define SCTP_SEND_BUFFER_MAX_WAIT_UNORDERED_MS 250
 
 #pragma once
