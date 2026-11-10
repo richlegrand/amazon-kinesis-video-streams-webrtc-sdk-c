@@ -1432,9 +1432,26 @@ STATUS deserializeRtcIceCandidateInit(PCHAR pJson, UINT32 jsonLen, PRtcIceCandid
     CHK(tokenCount > 1, STATUS_INVALID_API_CALL_RETURN_JSON);
     CHK(tokens[0].type == JSMN_OBJECT, STATUS_ICE_CANDIDATE_INIT_MALFORMED);
 
-    for (i = 1; i < (tokenCount - 1); i += 2) {
-        if (STRNCMP(CANDIDATE_KEY, pJson + tokens[i].start, ARRAY_SIZE(CANDIDATE_KEY) - 1) == 0) {
-            STRNCPY(pRtcIceCandidateInit->candidate, pJson + tokens[i + 1].start, (tokens[i + 1].end - tokens[i + 1].start));
+    // Top-level keys only. A value that is an object or array has its own tokens after it, so the next key is the
+    // first token that starts past the value's end. Stepping by two instead lets a nested value's tokens be read as
+    // keys, and a value that happened to begin with "candidate" was then copied in whole.
+    for (i = 1; i < tokenCount - 1 && tokens[i].start < tokens[0].end;) {
+        jsmntok_t* pKey = &tokens[i];
+        jsmntok_t* pValue = &tokens[i + 1];
+        INT32 keyLen = pKey->end - pKey->start;
+        INT32 valueLen = pValue->end - pValue->start;
+
+        if (keyLen == (INT32) (ARRAY_SIZE(CANDIDATE_KEY) - 1) && STRNCMP(CANDIDATE_KEY, pJson + pKey->start, keyLen) == 0 &&
+            pValue->type == JSMN_STRING) {
+            // The buffer holds MAX_ICE_CANDIDATE_INIT_CANDIDATE_LEN characters and a terminator. A longer candidate
+            // is refused rather than truncated, since a truncated one is a different, wrong candidate.
+            CHK(valueLen <= MAX_ICE_CANDIDATE_INIT_CANDIDATE_LEN, STATUS_ICE_CANDIDATE_INIT_MALFORMED);
+            MEMCPY(pRtcIceCandidateInit->candidate, pJson + pValue->start, valueLen);
+            pRtcIceCandidateInit->candidate[valueLen] = '\0';
+        }
+
+        for (i += 2; i < tokenCount && tokens[i].start < pValue->end; i++) {
+            // skip the value's nested tokens
         }
     }
 

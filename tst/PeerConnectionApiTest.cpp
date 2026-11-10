@@ -33,6 +33,25 @@ TEST_F(PeerConnectionApiTest, deserializeRtcIceCandidateInit)
     auto validCandidate2 = "{candidate: \"candidate: 1 2 3\", \"sdpMid\": 0}";
     EXPECT_EQ(deserializeRtcIceCandidateInit((PCHAR) validCandidate2, STRLEN(validCandidate2), &rtcIceCandidateInit), STATUS_SUCCESS);
     EXPECT_STREQ(rtcIceCandidateInit.candidate, "candidate: 1 2 3");
+
+    // A candidate nested in another object is not this object's candidate, and must not leave the nested JSON
+    // behind in the buffer.
+    auto nested = "{\"candidate\": {\"candidate\": \"candidate: 1 2 3\", \"sdpMid\": \"0\"}, \"type\": \"candidate\"}";
+    EXPECT_EQ(deserializeRtcIceCandidateInit((PCHAR) nested, STRLEN(nested), &rtcIceCandidateInit), STATUS_ICE_CANDIDATE_MISSING_CANDIDATE);
+
+    // A value of "candidate" is not the key.
+    auto valueNamedCandidate = "{\"type\": \"candidate\", \"candidate\": \"candidate: 4 5 6\"}";
+    EXPECT_EQ(deserializeRtcIceCandidateInit((PCHAR) valueNamedCandidate, STRLEN(valueNamedCandidate), &rtcIceCandidateInit), STATUS_SUCCESS);
+    EXPECT_STREQ(rtcIceCandidateInit.candidate, "candidate: 4 5 6");
+
+    // The longest candidate that fits, and one past it, which is refused rather than copied past the buffer.
+    std::string fits(MAX_ICE_CANDIDATE_INIT_CANDIDATE_LEN, 'a');
+    std::string longest = "{\"candidate\": \"" + fits + "\"}";
+    EXPECT_EQ(deserializeRtcIceCandidateInit((PCHAR) longest.c_str(), longest.size(), &rtcIceCandidateInit), STATUS_SUCCESS);
+    EXPECT_STREQ(rtcIceCandidateInit.candidate, fits.c_str());
+
+    std::string tooLong = "{\"candidate\": \"" + fits + "a\"}";
+    EXPECT_EQ(deserializeRtcIceCandidateInit((PCHAR) tooLong.c_str(), tooLong.size(), &rtcIceCandidateInit), STATUS_ICE_CANDIDATE_INIT_MALFORMED);
 }
 
 TEST_F(PeerConnectionApiTest, serializeSessionDescriptionInit)
