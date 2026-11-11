@@ -28,8 +28,8 @@ dependencies:
     path: ../libwebsockets
     version: "*"
 
-  media_stream:
-    path: ../media_stream
+  media_stream_if:
+    path: ../media_stream_if
     version: "*"
 
   app_webrtc:

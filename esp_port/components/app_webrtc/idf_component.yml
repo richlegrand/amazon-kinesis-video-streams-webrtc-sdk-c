@@ -4,16 +4,18 @@ dependencies:
   idf:
     version: ">=4.4.0"
 
-  media_stream:
-    path: ../media_stream
+  media_stream_if:
+    path: ../media_stream_if
     version: '*'
 
   kvs_utils:
     path: ../kvs_utils
     version: '*'
 
-  webrtc_bridge:
-    path: ../webrtc_bridge
+  # webrtc_mem_utils.h and esp_work_queue.h. This used to arrive by way of
+  # webrtc_bridge, which app_webrtc does not otherwise use.
+  esp_webrtc_utils:
+    path: ../esp_webrtc_utils
     version: '*'
 
   state_machine:
