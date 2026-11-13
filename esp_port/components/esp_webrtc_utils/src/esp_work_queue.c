@@ -139,8 +139,14 @@ esp_err_t esp_work_queue_start(void)
     /* Create the task with the appropriate stack and buffer */
     esp_err_t ret = ESP_OK;
     if (queue_config.prefer_ext_ram) {
-        task_buffer = heap_caps_calloc(1, sizeof(StaticTask_t), MALLOC_CAP_INTERNAL);
-        task_stack = heap_caps_malloc_prefer(queue_config.stack_size, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT, MALLOC_CAP_INTERNAL);
+        /* MALLOC_CAP_8BIT too: on the original ESP32, MALLOC_CAP_INTERNAL alone
+         * can return the spare IRAM ESP-IDF adds to the heap, which takes only
+         * 32-bit accesses. FreeRTOS writes bytes into a TCB (the name, the
+         * allocation flag) and faults with LoadStoreError. The S3 has no such
+         * region, which is why this only shows there. */
+        task_buffer = heap_caps_calloc(1, sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        task_stack = heap_caps_malloc_prefer(queue_config.stack_size, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         assert(task_buffer && task_stack);
 
         /* the task never exits, so do not bother to free the buffers */

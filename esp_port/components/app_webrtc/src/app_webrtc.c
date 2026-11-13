@@ -2054,13 +2054,20 @@ WEBRTC_STATUS app_webrtc_run(void)
     static StaticTask_t *task_buffer = NULL;
     static void *task_stack = NULL;
 
-    /* Check if we need to allocate or reuse existing buffers */
+    /* Check if we need to allocate or reuse existing buffers.
+     *
+     * MALLOC_CAP_8BIT too: on the original ESP32, MALLOC_CAP_INTERNAL alone
+     * can return the spare IRAM ESP-IDF adds to the heap, which takes only
+     * 32-bit accesses. FreeRTOS writes bytes into a TCB (the name, the
+     * allocation flag) and faults with LoadStoreError. The S3 has no such
+     * region, which is why this only shows there. */
     if (task_buffer == NULL) {
-        task_buffer = heap_caps_calloc(1, sizeof(StaticTask_t), MALLOC_CAP_INTERNAL);
+        task_buffer = heap_caps_calloc(1, sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     }
 
     if (task_stack == NULL) {
-        task_stack = heap_caps_calloc_prefer(1, WEBRTC_TASK_STACK_SIZE, 2, MALLOC_CAP_SPIRAM, MALLOC_CAP_INTERNAL);
+        task_stack = heap_caps_calloc_prefer(1, WEBRTC_TASK_STACK_SIZE, 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     }
 
     if (!task_buffer || !task_stack) {
